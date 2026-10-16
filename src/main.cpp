@@ -1595,9 +1595,23 @@ bool sdInit() {
    return false;
 }
 
+// Append device telemetry (same fields as the BLE system info) as query parameters
+String appendTelemetryParams(String url) {
+   bool isCharging = false;
+   if (settings.chargerMode) {
+      isCharging = chargeMode(settings.chargerMode);
+   }
+   url += (url.indexOf('?') >= 0) ? "&" : "?";
+   url += "voltage=" + String(systemData.vddValue);
+   url += "&usb=" + String(systemData.usbConnected ? 1 : 0);
+   url += "&charging=" + String(isCharging ? 1 : 0);
+   return url;
+}
+
 int loadImageFromWeb(String url, String fileName) {
    if (url.length() < 1)
       return -2;
+   url = appendTelemetryParams(url);
    Serial.print("[DL] Download Image file: ");
    Serial.println(url);
    // int setImage = 0; // Trigger refresh
