@@ -25,7 +25,7 @@ Das System besteht aus zwei Hauptkomponenten:
   - _Setup Mode_: Wird über 1x Reset-Taste gestartet (aktiviert BLE).
   - _WiFi Download Mode_: HTTP(s) Download eines Bildes nach dem Aufwachen.
   - _Deep Sleep / Wakeup_: Timer, Motion (Accelerometer), oder Button.
-- **Speicher:** Beachte stets das definierte EEPROM/Flash Memory Map (z. B. WLAN `0-105`, Settings ab `500+`), wenn Variablen dauerhaft gespeichert werden sollen.
+- **Speicher:** Dauerhafte Variablen werden per `Preferences` im NVS-Namespace `settings` gespeichert (`settingsStore`); NVS-Keys dürfen max. 15 Zeichen lang sein.
 
 ---
 

@@ -108,9 +108,3 @@ struct SystemData
    bool sdIsInit;
    bool sdReady;
 };
-
-struct DataLayout
-{
-   int integer;
-   char byte[4];
-};

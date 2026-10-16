@@ -91,16 +91,18 @@ Offline first Firmware for an ESP32-C6 based E-Paper display device, featuring W
   - Accelerometer (motion) (optional).
   - Button press.
 
-## Memory Map (EEPROM/Flash)
+## Persistent Settings (NVS)
 
-- `0-39`: WiFi Name
-- `40-105`: WiFi Password
-- `210`: Sleep Time
-- `220`: Display Orientation Store
-- `499`: Magic Flag (First Boot Indicator)
-- `500+`: Settings Store
+Alle Einstellungen liegen im NVS-Namespace `settings` (Partition `nvs`, siehe `part.csv`):
 
-> **First Boot Initialization**: Beim ersten Start (oder wenn die Magic Flag bei Adresse 499 nicht `42` ist) wird der EEPROM automatisch bereinigt und mit sinnvollen Standardwerten (z.B. Timeout = 3600s) initialisiert.
+- `ssid`, `pss`: WiFi Name / Passwort
+- `timeout`: Sleep Time
+- `orientation`: Display Orientation Store
+- `initialized`: First Boot Indicator
+- `battWarn`, `wifiWarn`, `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`
+- `downloadUrl`, `lastModified`, `httpAuthUser`, `httpAuthPass`, `settingsUrl`, `settingsLastMod`
+
+> **First Boot Initialization**: Beim ersten Start (oder wenn `initialized` fehlt) wird der Namespace bereinigt und mit sinnvollen Standardwerten (z.B. Timeout = 3600s) initialisiert.
 
 ## Remote JSON Settings
 
@@ -108,7 +110,7 @@ The firmware supports fetching its configuration automatically from an HTTP JSON
 
 - Configure the **Settings JSON URL** in the Web-UI or via BLE.
 - When the device wakes up and connects to WiFi, it will automatically fetch the JSON.
-- It leverages the HTTP `Last-Modified` and `If-Modified-Since` headers to avoid unnecessary parsing and EEPROM writes, saving battery and flash memory life.
+- It leverages the HTTP `Last-Modified` and `If-Modified-Since` headers to avoid unnecessary parsing and flash writes, saving battery and flash memory life.
 - In the Web-UI, you can click "Prüfen" to preview the JSON and apply it directly. The Web-UI uses an intelligent CORS proxy fallback to bypass browser security restrictions when testing public URLs.
 
 An example `settings_sample.json` is provided in the repository:
@@ -177,7 +179,7 @@ Verwaltet alle Einstellungen und kümmert sich um den Upload von Bildern und Fir
 
 Der CMD Channel verarbeitet Strings, um Uploads zu steuern oder das Gerät zurückzusetzen:
 
-- `RESET`: Löscht alle Einstellungen im EEPROM (Factory Reset) und startet neu.
+- `RESET`: Löscht alle Einstellungen im NVS (Factory Reset) und startet neu.
 - `APPLY`: Beendet den Setup-Modus vorzeitig und lädt das neu empfangene Bild auf das Display.
 - `SCAN_WIFI`: Startet einen asynchronen WLAN-Scan. Die Ergebnisse werden anschließend per Notification über den `WiFi Scan` Characteristic zurückgesendet.
 
