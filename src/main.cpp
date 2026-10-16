@@ -199,7 +199,7 @@ bool isBleClientConnected = false;
 bool buttonWake = false; // true if wakeup via reset button
 bool fwUpdateInProgress = false;
 bool stopAccRecheck = false;
-bool isOrientUpdate = false;
+volatile int pendingOrientation = -1; // written by the orientation ticker, applied by applyPendingOrientation()
 uint8_t *strip_buffer = nullptr;
 int16_t err_curr[MAX_EPD_WIDTH * 3];
 int16_t err_next[MAX_EPD_WIDTH * 3];
@@ -214,7 +214,8 @@ int clampSleepTimeout(int seconds);
 void gotToDeepSleep(int seconds, bool showScreen = true, bool motionWake = true);
 int accInit(bool skipInit = false);
 bool accIntSet(int sensity);
-void checkOrientationInBackground(int setOrientValue = -1, bool isRunning = true);
+void checkOrientationInBackground(bool isRunning = true);
+bool applyPendingOrientation();
 bool chargeMode(bool enable);
 bool usbInit();
 bool usbCheckConnect();
@@ -225,6 +226,7 @@ void runSetupMode();
 int processHttpDownload(String fileName);
 bool sdInit(void);
 void accUpdateOrient();
+bool connectWifi(uint32_t timeoutMs = 20000);
 
 uint32_t calcCRC32(const uint8_t *data, size_t len) {
    return crc32_le(0, data, len);
@@ -660,54 +662,51 @@ bool powerSupplyDisplay(bool enable) {
 #endif
 
 void WiFiEvent(WiFiEvent_t event) {
-   if (DEBUG_FLAG)
-      // Serial.printf("[WiFi-event] event: %d\n", event);
+   switch (event) {
+   case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      if (DEBUG_FLAG)
+         Serial.println("[NETWORK] WiFi connected");
+      Serial.printf("[NETWORK] IP address: ");
+      Serial.println(WiFi.localIP());
 
-      switch (event) {
-      case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-         if (DEBUG_FLAG)
-            Serial.println("[NETWORK] WiFi connected");
-         Serial.printf("[NETWORK] IP address: ");
-         Serial.println(WiFi.localIP());
+      if (wifiSettings.wifiIsConnected != true) {
+         wifiSettings.wifiIsConnected = true;
+         if (wifiSettings.bleInitOk) {
+            uint8_t val = 1;
+            wifiConnectedCharacteristic->setValue(&val, 1);
+            wifiConnectedCharacteristic->notify();
 
-         if (wifiSettings.wifiIsConnected != true) {
-            wifiSettings.wifiIsConnected = true;
-            if (wifiSettings.bleInitOk) {
-               uint8_t val = 1;
-               wifiConnectedCharacteristic->setValue(&val, 1);
-               wifiConnectedCharacteristic->notify();
-
-               if (wifiInfoCharacteristic) {
-                  JsonDocument doc;
-                  doc["ip"] = WiFi.localIP().toString();
-                  doc["rssi"] = WiFi.RSSI();
-                  String json;
-                  serializeJson(doc, json);
-                  wifiInfoCharacteristic->setValue(json.c_str());
-                  wifiInfoCharacteristic->notify();
-               }
+            if (wifiInfoCharacteristic) {
+               JsonDocument doc;
+               doc["ip"] = WiFi.localIP().toString();
+               doc["rssi"] = WiFi.RSSI();
+               String json;
+               serializeJson(doc, json);
+               wifiInfoCharacteristic->setValue(json.c_str());
+               wifiInfoCharacteristic->notify();
             }
          }
-
-         break;
-      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-         Serial.println("[NETWORK] WiFi lost connection");
-         wifiSettings.wifiOnboardingFailed = true;
-         if (wifiSettings.wifiIsConnected != false) {
-            wifiSettings.wifiIsConnected = false;
-            if (wifiSettings.bleInitOk) {
-               uint8_t val = 0;
-               wifiConnectedCharacteristic->setValue(&val, 1);
-               wifiConnectedCharacteristic->notify();
-
-               if (wifiInfoCharacteristic) {
-                  wifiInfoCharacteristic->setValue("{}");
-                  wifiInfoCharacteristic->notify();
-               }
-            }
-         }
-         break;
       }
+
+      break;
+   case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.println("[NETWORK] WiFi lost connection");
+      wifiSettings.wifiOnboardingFailed = true;
+      if (wifiSettings.wifiIsConnected != false) {
+         wifiSettings.wifiIsConnected = false;
+         if (wifiSettings.bleInitOk) {
+            uint8_t val = 0;
+            wifiConnectedCharacteristic->setValue(&val, 1);
+            wifiConnectedCharacteristic->notify();
+
+            if (wifiInfoCharacteristic) {
+               wifiInfoCharacteristic->setValue("{}");
+               wifiInfoCharacteristic->notify();
+            }
+         }
+      }
+      break;
+   }
 }
 
 void timeoutFailsafe(int time) {
@@ -1674,7 +1673,7 @@ void setDeviceUid() {
 // sleep x seconds
 void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
-   checkOrientationInBackground(0, false);
+   checkOrientationInBackground(false);
    if (!settings.sleepDisabled)
       WiFi.disconnect(true);
    if (motionWake) {
@@ -1953,37 +1952,36 @@ bool accIntSet(int sensity) {
    return true;
 }
 
-void recheckAccOrient(int setOrientValue) {
+// Runs on the esp_timer task: only sample the accelerometer, never touch NVS or the display here.
+void recheckAccOrient() {
    if (stopAccRecheck)
       return;
    int accCheck = accInit(true);
-   if (accCheck != settingsStore.getInt("orientation", 0)) {
-      isOrientUpdate = true;
-      systemData.deviceOrientation = accCheck;
-      Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
-      settingsStore.putInt("orientation", systemData.deviceOrientation);
-      if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
-         displaySetRotation(1);
-      }
-      else {
-         displaySetRotation(0);
-      }
-      if (isEpaperActive()) {
-         deinitDisplay();
-         // ESP.restart();
-      }
-   }
-   else {
-      // if (DEBUG_FLAG) Serial.printf("[ACC] No Acc Update after recheck\n");
-   }
+   if (accCheck >= 0)
+      pendingOrientation = accCheck;
 }
 
-void checkOrientationInBackground(int setOrientValue, bool isRunning) {
+// Apply an orientation change seen by the background ticker. Call only from the main loop at points
+// where no display update is running. Returns true if the orientation changed.
+bool applyPendingOrientation() {
+   int orient = pendingOrientation;
+   if (orient < 0 || orient == systemData.deviceOrientation)
+      return false;
+   systemData.deviceOrientation = orient;
+   Serial.printf("[ACC] Orientation changed to %d\n", orient);
+   if (settingsStore.getInt("orientation", 0) != orient)
+      settingsStore.putInt("orientation", orient);
+   displaySetRotation((orient == 2 || orient == 3) ? 1 : 0);
+   return true;
+}
+
+void checkOrientationInBackground(bool isRunning) {
    if (isRunning) {
       stopAccRecheck = false;
+      pendingOrientation = -1;
       Serial.printf("[ACC] Background update start\n");
 
-      periodicAccCheck.attach_ms(1000, recheckAccOrient, setOrientValue);
+      periodicAccCheck.attach_ms(1000, recheckAccOrient);
    }
    else {
       Serial.printf("[ACC] Background update stop\n");
@@ -2032,7 +2030,7 @@ bool chargeMode(bool enable) {
 }
 
 bool resetAll(bool resetWifi) {
-   checkOrientationInBackground(0, false);
+   checkOrientationInBackground(false);
    Serial.printf("[MAIN] Reset - WIFI %d \n", resetWifi);
    settingsStore.putInt("orientation", 0); // restore screen orient to default
    storeSleepTimeMem(DEFAULT_SLEEP); // restore sleep mem store to default
@@ -2202,14 +2200,7 @@ void runSetupMode() {
          WiFi.mode(WIFI_STA);
          delay(100);
 
-         WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
-
-         unsigned long startWait = millis();
-         while (WiFi.status() != WL_CONNECTED && millis() - startWait < 10000) {
-            delay(100);
-         }
-
-         if (WiFi.status() == WL_CONNECTED) {
+         if (connectWifi(10000)) {
             Serial.println("[WIFI] Connected successfully!");
             // check valid wifi connection
             settingsStore.putString("ssid", wifiSettings.ssid);
@@ -2275,18 +2266,21 @@ void runSetupMode() {
    }
 }
 
+// Connect to the stored WiFi (no-op if already connected). Returns true when connected.
+bool connectWifi(uint32_t timeoutMs) {
+   if (WiFi.status() == WL_CONNECTED)
+      return true;
+   WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
+   unsigned long startWait = millis();
+   while (WiFi.status() != WL_CONNECTED && millis() - startWait < timeoutMs) {
+      delay(100);
+   }
+   return WiFi.status() == WL_CONNECTED;
+}
+
 int processHttpDownload(String fileName) {
    int dlSuccess = 0;
-   if (WiFi.status() != WL_CONNECTED) {
-      WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
-      int WLcount = 0;
-      while (WiFi.status() != WL_CONNECTED && WLcount < 200) {
-         delay(100);
-         ++WLcount;
-      }
-   }
-
-   if (WiFi.status() == WL_CONNECTED) {
+   if (connectWifi()) {
       dlSuccess = loadImageFromWeb(settings.downloadUrl, "tmp_raw.bin");
       if (dlSuccess == 0) {
          if (processImageFile("tmp_raw.bin", fileName.c_str())) {
@@ -2513,8 +2507,6 @@ void setup() {
    char firmwareVersion[] = SOFTWARE_VERSION;
 
    ledBlink(500, true);
-   Serial.begin(115200);
-   sleep(1);
 
    Serial.printf("[MAIN] INIT Device V: %s\n", firmwareVersion);
    if (DEBUG_FLAG)
@@ -2562,7 +2554,6 @@ void setup() {
       BleInit(CLIENT_ID, false); // Stop BLE advertising to save memory
       // Always proceed to loop to fetch URL or refresh picture
       downloadStart = true;
-      delay(200);
       tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsafe, 0);
    }
    else {
@@ -2590,10 +2581,9 @@ void loop() {
       downloadStart = false;
       if (settings.autoRotation) {
          accUpdateOrient();
-         checkOrientationInBackground(systemData.deviceOrientation, true);
+         checkOrientationInBackground(true);
       }
 
-      delay(200);
       String fileName = "tmp.bmp";
       int dlSuccess = 0;
 
@@ -2606,16 +2596,7 @@ void loop() {
 
       // Ensure WiFi if we need it for Settings OR Image
       if (settings.settingsUrl.length() > 0 || settings.imageMode == 1) {
-         if (WiFi.status() != WL_CONNECTED) {
-            WiFi.begin(wifiSettings.ssid.c_str(), wifiSettings.pss.c_str());
-            int WLcount = 0;
-            while (WiFi.status() != WL_CONNECTED && WLcount < 200) {
-               delay(100);
-               ++WLcount;
-            }
-         }
-
-         if (WiFi.status() == WL_CONNECTED) {
+         if (connectWifi()) {
             int prevTimeout = settings.timeout;
             bool prevChargerMode = settings.chargerMode;
             fetchRemoteSettings(); // This might change imageMode or downloadUrl!
@@ -2654,7 +2635,13 @@ void loop() {
          }
          else if (dlSuccess == 0 || settings.imageMode == 0) {
             WiFi.disconnect(true);
+            applyPendingOrientation();
             setSuccess = setImageFromFS(fileName);
+            // Device was rotated while drawing: redraw once with the new rotation
+            if (setSuccess == 0 && applyPendingOrientation()) {
+               waitDisplayComplete(false);
+               setSuccess = setImageFromFS(fileName);
+            }
             if (setSuccess == 0 && dlSuccess == 0) {
                if (tempLastModified.length() > 0) {
                   settings.lastModified = tempLastModified;
@@ -2669,6 +2656,7 @@ void loop() {
          }
       }
       else {
+         applyPendingOrientation();
          displaySetText("Error: Picture download failed, please try again", false);
          setSuccess = -1;
       }
