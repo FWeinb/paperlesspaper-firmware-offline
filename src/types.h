@@ -9,6 +9,15 @@
 #define SOFTWARE_VERSION "0.0.0"
 #define DEBUG 1
 
+// Debug-only serial log (printf style); compiled out, arguments included, when DEBUG is 0
+#if DEBUG
+#define DEBUG_LOG(...) Serial.printf(__VA_ARGS__)
+#else
+#define DEBUG_LOG(...) \
+   do {                \
+   } while (0)
+#endif
+
 #define DISPLAY_SPI_SPEED 20000000
 #define QR_VERSION 3
 #define QR_QUIET_ZONE 4
