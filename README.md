@@ -71,9 +71,9 @@ Offline first Firmware for an ESP32-C6 based E-Paper display device, featuring W
     - You can set WiFi credentials, a local HTTP download URL, the sleep timeout, or upload an image directly via Web-BLE.
 
 3.  **Build and Upload Firmware**
-    - Select your display size in `src/main.cpp` via the macro `#define SET_DISPLAY` (`0` for 7-inch, `1` for 13-inch).
+    - Select your display size via the PlatformIO environment: `epd13` (13-inch, default) or `epd7` (7-inch).
     - Start your Devices **Boot Mode** (see "Hardware Settings" below for instructions)
-    - Run the PlatformIO task: `General` -> `Upload`.
+    - Run the PlatformIO task `epd13` / `epd7` -> `General` -> `Upload`, or from the CLI: `pio run -e epd7 -t upload`.
 
 ## Modes of Operation
 - **Setup Mode (BLE Activation)**: Press the **reset button once** (the big button) to wake the device and activate Bluetooth (BLE). 

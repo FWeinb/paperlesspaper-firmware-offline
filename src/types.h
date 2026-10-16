@@ -1,12 +1,10 @@
 #pragma once
 #include <Arduino.h>
 
-// ==========================================
-// DISPLAY SELECTION
-// ==========================================
-#define EPD_TYPE_13INCH
-// #define EPD_TYPE_7INCH
-// ==========================================
+// Display selection comes from the PlatformIO env (epd13 / epd7)
+#if defined(EPD_TYPE_13INCH) == defined(EPD_TYPE_7INCH)
+#error "Define exactly one of EPD_TYPE_13INCH or EPD_TYPE_7INCH (build with -e epd13 or -e epd7)"
+#endif
 
 #define SOFTWARE_VERSION "0.0.0"
 #define DEBUG 1
