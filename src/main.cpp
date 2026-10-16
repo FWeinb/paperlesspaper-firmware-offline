@@ -20,6 +20,7 @@
 #include <Update.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
+#include <atomic>
 #include <rom/crc.h>
 #include <rom/rtc.h>
 
@@ -189,7 +190,6 @@ Ticker onceDisplay;
 SerialFlashFile saveFile;
 SerialFlashFile rawOutFile;
 SerialFlashFile jpgInFile;
-SerialFlashFile bleFile;
 SdFs sd;
 RTC_DATA_ATTR timeval previousWakeup = timeval{.tv_sec = 0, .tv_usec = 0};
 JPEGDEC jpeg;
@@ -224,14 +224,42 @@ bool bleImageApplied = false;
 bool forceExitSetup = false;
 bool isBleClientConnected = false;
 bool buttonWake = false; // true if wakeup via reset button
-bool fwUpdateInProgress = false;
+volatile bool fwUpdateInProgress = false;
 bool stopAccRecheck = false;
 volatile int pendingOrientation = -1; // written by the orientation ticker, applied by applyPendingOrientation()
 uint8_t *strip_buffer = nullptr;
 int16_t err_curr[MAX_EPD_WIDTH * 3];
 int16_t err_next[MAX_EPD_WIDTH * 3];
 char CLIENT_ID[20];
-uint8_t *bleWriteBuffer = nullptr;
+uint8_t *bleWriteBuffer = nullptr; // RAM buffer receiving BLE upload packets
+
+// BLE upload worker (#17): BLE callbacks only buffer data and queue jobs, the worker task does the flash / OTA work
+enum BleJobType : uint8_t {
+   BLE_JOB_START_IMAGE,
+   BLE_JOB_START_FW,
+   BLE_JOB_FLUSH,
+   BLE_JOB_END_IMAGE,
+   BLE_JOB_END_FW,
+   BLE_JOB_APPLY,
+   BLE_JOB_ABORT,
+   BLE_JOB_RESET
+};
+struct BleJob {
+   BleJobType type;
+   uint16_t len;
+};
+#define BLE_STATUS_ERROR 0xFFFF // cmd characteristic read: last upload failed
+#define BLE_STATUS_BUSY 0xFFFE  // cmd characteristic read: worker still processing (only reported while the RAM buffer is empty)
+QueueHandle_t bleJobQueue = nullptr;
+SemaphoreHandle_t spiMutex = nullptr; // serializes SPI use (flash vs display) between the BLE worker and the main loop
+std::atomic<int> blePendingJobs{0};
+uint8_t *bleFlushBuffer = nullptr; // filled buffer handed to the worker
+volatile bool bleFlushBufferBusy = false;
+volatile bool bleUploadActive = false; // data packets are accepted
+volatile bool bleStatusError = false;
+uint32_t bleRxCrc = 0;      // CRC32 of all handed-off upload data (BLE task)
+uint32_t bleWrittenCrc = 0; // CRC32 of all data the worker wrote (worker task); both must match the uploaded file
+volatile uint16_t bleUploadConnHandle = 0xFFFF; // connection that started the current upload (BLE_HS_CONN_HANDLE_NONE)
 
 void ledBlink(int timeout, bool on, int dimValue = 100);
 void debugFS(void);
@@ -257,6 +285,63 @@ bool connectWifi(uint32_t timeoutMs = 20000);
 SerialFlashFile openErasedFile(const char *fileName);
 void invalidateDownloadCache();
 void setImageValid(bool valid);
+void bleWorkerInit();
+void bleWorkerShutdown();
+bool copyFlashFile(SerialFlashFile &inFile, uint32_t rawLength, SerialFlashFile &outFile);
+
+void spiLock() {
+   if (spiMutex)
+      xSemaphoreTakeRecursive(spiMutex, portMAX_DELAY);
+}
+void spiUnlock() {
+   if (spiMutex)
+      xSemaphoreGiveRecursive(spiMutex);
+}
+
+bool blePostJob(BleJobType type, uint16_t len = 0) {
+   BleJob job = {type, len};
+   blePendingJobs++;
+   if (!bleJobQueue || xQueueSend(bleJobQueue, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
+      blePendingJobs--;
+      Serial.printf("[BLE] ERROR: could not queue job %d\n", type);
+      bleStatusError = true;
+      return false;
+   }
+   return true;
+}
+
+bool bleAllocBuffers() {
+   if (!bleWriteBuffer)
+      bleWriteBuffer = (uint8_t *)malloc(BLE_BUFFER_SIZE);
+   if (!bleFlushBuffer)
+      bleFlushBuffer = (uint8_t *)malloc(BLE_BUFFER_SIZE);
+   return bleWriteBuffer && bleFlushBuffer;
+}
+
+// Hand the filled RAM buffer to the worker and continue receiving into the other one.
+// Only waits if the worker has not finished writing the previous buffer yet.
+bool bleHandOffBuffer() {
+   if (bleWriteBufferPos == 0)
+      return true;
+   unsigned long waitStart = millis();
+   while (bleFlushBufferBusy) {
+      if (millis() - waitStart > 1500) {
+         Serial.println("[BLE] ERROR: flash worker too slow, dropping data");
+         bleStatusError = true;
+         bleWriteBufferPos = 0;
+         return false;
+      }
+      vTaskDelay(pdMS_TO_TICKS(5));
+   }
+   uint8_t *filled = bleWriteBuffer;
+   bleWriteBuffer = bleFlushBuffer;
+   bleFlushBuffer = filled;
+   uint16_t len = bleWriteBufferPos;
+   bleRxCrc = crc32_le(bleRxCrc, filled, len);
+   bleWriteBufferPos = 0;
+   bleFlushBufferBusy = true;
+   return blePostJob(BLE_JOB_FLUSH, len);
+}
 
 // Drop a "#fragment": it is never sent to the server and would end up in front of appended query params
 String stripUrlFragment(String url) {
@@ -926,23 +1011,27 @@ class ServerCallbacks : public NimBLEServerCallbacks
 {
    void onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo) override {
       Serial.printf("\n[BLE]Client address: %s\n", connInfo.getAddress().toString().c_str());
+      // Only one client at a time: advertising stops on connect and is not restarted until it disconnects
+      if (pServer->getConnectedCount() > 1) {
+         Serial.println("[BLE] Already connected to another client, rejecting");
+         pServer->disconnect(connInfo.getConnHandle());
+         return;
+      }
       pServer->updateConnParams(connInfo.getConnHandle(), 24, 48, 0, 180);
       isBleClientConnected = true;
-      if (wifiSettings.bleInitOk) {
-         Serial.printf("[BLE] restart advertising...\n[");
-         NimBLEDevice::startAdvertising();
-      }
    }
    void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo, int reason) override {
-      Serial.printf("\n[BLE] Client disconnected");
-      isBleClientConnected = false;
+      Serial.printf("\n[BLE] Client disconnected (%u clients left)", pServer->getConnectedCount());
+      // Several clients may be connected (e.g. a second browser tab): only the last disconnect counts
+      isBleClientConnected = pServer->getConnectedCount() > 0;
       lastDisconnectTime = millis();
-      if (bleWriteBuffer != nullptr) {
-         free(bleWriteBuffer);
-         bleWriteBuffer = nullptr;
+      // Only abort if the client that is uploading went away
+      if ((bleUploadActive || fwUpdateInProgress) && connInfo.getConnHandle() == bleUploadConnHandle) {
+         bleUploadActive = false;
+         bleUploadConnHandle = 0xFFFF;
+         blePostJob(BLE_JOB_ABORT);
       }
-      fwUpdateInProgress = false;
-      if (wifiSettings.bleInitOk) {
+      if (wifiSettings.bleInitOk && pServer->getConnectedCount() == 0) {
          Serial.printf("\n[BLE] restart advertising...\n[");
          NimBLEDevice::startAdvertising();
       }
@@ -958,8 +1047,13 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
    void onRead(NimBLECharacteristic *pCharacteristic, NimBLEConnInfo &connInfo) override {
       std::string uuidStr = pCharacteristic->getUUID().toString();
       if (uuidStr == "10000004-0000-0000-0000-000000000001") {
-         // Return current bytes in the RAM buffer
-         pCharacteristic->setValue((uint8_t *)&bleWriteBufferPos, 2);
+         // Return current bytes in the RAM buffer, or an error / busy status
+         uint16_t status = bleWriteBufferPos;
+         if (bleStatusError)
+            status = BLE_STATUS_ERROR;
+         else if (bleWriteBufferPos == 0 && blePendingJobs > 0)
+            status = BLE_STATUS_BUSY;
+         pCharacteristic->setValue((uint8_t *)&status, 2);
          return;
       }
       Serial.printf("%s : onRead(), value: %s\n",
@@ -1047,63 +1141,40 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
             Serial.println("[BLE] EXIT_SETUP received. Forcing exit...");
             forceExitSetup = true;
          }
-         else if (cmd == "START") {
-            if (bleWriteBuffer == nullptr) {
-               bleWriteBuffer = (uint8_t *)malloc(BLE_BUFFER_SIZE);
-            }
-            if (bleWriteBuffer == nullptr) {
-               Serial.println("[BLE] ERROR: Failed to allocate memory for image buffer!");
+         else if (cmd == "START" || cmd == "START_FW") {
+            if (!bleAllocBuffers()) {
+               Serial.println("[BLE] ERROR: Failed to allocate memory for upload buffers!");
+               bleStatusError = true;
                return;
             }
-            bleFile = openErasedFile(IMAGE_FILE);
-            setImageValid(false);
-            invalidateDownloadCache();
-            bleBytesReceived = 0;
+            bleStatusError = false;
+            bleRxCrc = 0;
             bleWriteBufferPos = 0;
-            // Modus automatisch auf Lokales Bild (BLE) wechseln
-            settings.imageMode = 0;
-            saveSettings();
-            Serial.println("[BLE] Upload STARTED. Switched to ImageMode 0.");
+            bleUploadActive = true;
+            bleUploadConnHandle = connInfo.getConnHandle();
+            if (cmd == "START_FW") {
+               tickerFailsave.detach();
+               blePostJob(BLE_JOB_START_FW);
+            }
+            else {
+               blePostJob(BLE_JOB_START_IMAGE);
+            }
          }
          else if (cmd == "FLUSH") {
-            if (fwUpdateInProgress && bleWriteBufferPos > 0) {
-               Update.write(bleWriteBuffer, bleWriteBufferPos);
-               bleWriteBufferPos = 0;
-            }
-            else if (bleFile && bleWriteBufferPos > 0) {
-               bleFile.write(bleWriteBuffer, bleWriteBufferPos);
-               bleBytesReceived += bleWriteBufferPos;
-               bleWriteBufferPos = 0;
-            }
+            bleHandOffBuffer();
          }
          else if (cmd == "CLEAR") {
             bleWriteBufferPos = 0;
             Serial.println("[BLE] Buffer CLEARED due to packet loss!");
          }
-         else if (cmd == "END") {
-            if (bleFile) {
-               if (bleWriteBufferPos > 0) {
-                  bleFile.write(bleWriteBuffer, bleWriteBufferPos);
-                  bleBytesReceived += bleWriteBufferPos;
-                  bleWriteBufferPos = 0;
-               }
-               bleFile.close();
-            }
-            if (bleWriteBuffer != nullptr) {
-               free(bleWriteBuffer);
-               bleWriteBuffer = nullptr;
-            }
-            Serial.printf("[BLE] Upload ENDED. Bytes: %d\n", bleBytesReceived);
-            if (bleBytesReceived != (EPD_WIDTH * EPD_HEIGHT / 2)) {
-               Serial.printf("[BLE] WARNING: Payload size mismatch! Expected %d, got %d. Image will be corrupted!\n", (EPD_WIDTH * EPD_HEIGHT / 2), bleBytesReceived);
-            }
-            else {
-               setImageValid(true);
-            }
+         else if (cmd == "END" || cmd == "END_FW") {
+            bleHandOffBuffer();
+            bleUploadActive = false;
+            blePostJob(cmd == "END_FW" ? BLE_JOB_END_FW : BLE_JOB_END_IMAGE);
          }
          else if (cmd == "APPLY") {
             Serial.println("[BLE] Settings APPLY received.");
-            applyPending = true;
+            blePostJob(BLE_JOB_APPLY);
          }
          else if (cmd == "SAVE_SETTINGS") {
             Serial.println("[BLE] SAVE_SETTINGS received.");
@@ -1111,52 +1182,15 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
          }
          else if (cmd == "RESET") {
             Serial.println("[BLE] Settings RESET received.");
-            resetAll(true);
-            ESP.restart();
-         }
-         else if (cmd == "START_FW") {
-            if (bleWriteBuffer == nullptr) {
-               bleWriteBuffer = (uint8_t *)malloc(BLE_BUFFER_SIZE);
-            }
-            if (bleWriteBuffer == nullptr) {
-               Serial.println("[BLE] ERROR: Failed to allocate memory for firmware buffer!");
-               return;
-            }
-            fwUpdateInProgress = true;
-            bleWriteBufferPos = 0;
-            tickerFailsave.detach();
-            if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-               Update.printError(Serial);
-            }
-            else {
-               Serial.println("[BLE] Firmware Update STARTED.");
-            }
-         }
-         else if (cmd == "END_FW") {
-            if (fwUpdateInProgress && bleWriteBufferPos > 0) {
-               Update.write(bleWriteBuffer, bleWriteBufferPos);
-               bleWriteBufferPos = 0;
-            }
-            fwUpdateInProgress = false;
-            if (bleWriteBuffer != nullptr) {
-               free(bleWriteBuffer);
-               bleWriteBuffer = nullptr;
-            }
-            if (Update.end(true)) {
-               Serial.println("[BLE] Firmware Update SUCCESS. Rebooting...");
-               delay(500);
-               ESP.restart();
-            }
-            else {
-               Update.printError(Serial);
-               Serial.println("[BLE] Firmware Update FAILED.");
-               bleWriteBufferPos = 0xFFFF;
-            }
+            blePostJob(BLE_JOB_RESET);
          }
       }
       else if (uuidStr == "10000003-0000-0000-0000-000000000001") {
-         const uint8_t *pData = pCharacteristic->getValue().data();
-         if ((bleFile || fwUpdateInProgress) && pData && dataLen > 4 && bleWriteBuffer != nullptr) {
+         // Keep the value alive: getValue() returns a copy, a pointer into the temporary would dangle
+         NimBLEAttValue value = pCharacteristic->getValue();
+         const uint8_t *pData = value.data();
+         dataLen = value.length();
+         if (bleUploadActive && pData && dataLen > 4 && bleWriteBuffer != nullptr) {
             uint32_t packetCrc = pData[0] | (pData[1] << 8) | (pData[2] << 16) | (pData[3] << 24);
             size_t actualDataLen = dataLen - 4;
             uint32_t calculatedCrc = calcCRC32(pData + 4, actualDataLen);
@@ -1384,6 +1418,174 @@ class FlashFileWriter : public Stream {
    uint32_t _crc = 0;
    bool _overflow = false;
 };
+
+// ---- BLE upload worker ----
+// Image uploads are staged in DOWNLOAD_FILE and only copied to IMAGE_FILE (and imageMode switched)
+// after END with the exact image size, so a failed upload keeps the old image and mode (#18).
+SerialFlashFile bleStagingFile;
+FlashFileWriter *bleStagingWriter = nullptr;
+bool bleImageReady = false; // END succeeded, APPLY may render
+
+void bleRunJob(const BleJob &job) {
+   switch (job.type) {
+   case BLE_JOB_START_IMAGE:
+      delete bleStagingWriter;
+      bleStagingWriter = nullptr;
+      bleStagingFile = SerialFlash.open(DOWNLOAD_FILE);
+      if (bleStagingFile)
+         bleStagingWriter = new FlashFileWriter(bleStagingFile);
+      else
+         bleStatusError = true;
+      bleBytesReceived = 0;
+      bleWrittenCrc = 0;
+      bleImageReady = false;
+      Serial.println("[BLE] Image upload STARTED.");
+      break;
+
+   case BLE_JOB_START_FW:
+      bleBytesReceived = 0;
+      bleWrittenCrc = 0;
+      if (Update.begin(UPDATE_SIZE_UNKNOWN)) {
+         fwUpdateInProgress = true;
+         Serial.println("[BLE] Firmware Update STARTED.");
+      }
+      else {
+         Update.printError(Serial);
+         bleStatusError = true;
+      }
+      break;
+
+   case BLE_JOB_FLUSH:
+      bleWrittenCrc = crc32_le(bleWrittenCrc, bleFlushBuffer, job.len);
+      if (fwUpdateInProgress) {
+         if (Update.write(bleFlushBuffer, job.len) != job.len) {
+            Update.printError(Serial);
+            bleStatusError = true;
+         }
+      }
+      else if (bleStagingWriter) {
+         if (bleStagingWriter->write(bleFlushBuffer, job.len) != job.len) {
+            Serial.println("[BLE] ERROR: image upload too large");
+            bleStatusError = true;
+         }
+      }
+      bleBytesReceived += job.len;
+      bleFlushBufferBusy = false;
+      break;
+
+   case BLE_JOB_END_IMAGE: {
+      const uint32_t expected = EPD_WIDTH * EPD_HEIGHT / 2;
+      Serial.printf("[BLE] Upload ENDED. Bytes: %u CRC32 received: 0x%08X written: 0x%08X\n", bleBytesReceived, bleRxCrc, bleWrittenCrc);
+      if (!bleStagingWriter || bleStatusError || bleBytesReceived != expected) {
+         Serial.printf("[BLE] ERROR: upload rejected (expected %u bytes, got %u). Keeping current image and mode.\n", expected, bleBytesReceived);
+         bleStatusError = true;
+      }
+      else {
+         SerialFlashFile out = openErasedFile(IMAGE_FILE);
+         if (out && copyFlashFile(bleStagingFile, bleBytesReceived, out)) {
+            setImageValid(true);
+            invalidateDownloadCache();
+            settings.imageMode = 0;
+            saveSettings();
+            bleImageReady = true;
+            Serial.println("[BLE] Image stored. Switched to ImageMode 0.");
+         }
+         else {
+            setImageValid(false);
+            bleStatusError = true;
+         }
+      }
+      delete bleStagingWriter;
+      bleStagingWriter = nullptr;
+      break;
+   }
+
+   case BLE_JOB_END_FW:
+      fwUpdateInProgress = false;
+      Serial.printf("[BLE] Firmware upload ENDED. Bytes: %u CRC32 received: 0x%08X written: 0x%08X\n", bleBytesReceived, bleRxCrc, bleWrittenCrc);
+      if (!bleStatusError && Update.end(true)) {
+         Serial.println("[BLE] Firmware Update SUCCESS. Rebooting...");
+         delay(500);
+         ESP.restart();
+      }
+      Update.printError(Serial);
+      if (Update.isRunning())
+         Update.abort();
+      Serial.println("[BLE] Firmware Update FAILED.");
+      bleStatusError = true;
+      break;
+
+   case BLE_JOB_APPLY:
+      if (bleImageReady) {
+         bleImageReady = false;
+         applyPending = true;
+      }
+      else {
+         Serial.println("[BLE] APPLY ignored, no valid uploaded image.");
+      }
+      break;
+
+   case BLE_JOB_ABORT:
+      if (fwUpdateInProgress) {
+         Update.abort();
+         fwUpdateInProgress = false;
+         Serial.println("[BLE] Firmware update aborted (disconnect).");
+      }
+      bleStatusError = true; // a client still polling the status sees the upload failed
+      delete bleStagingWriter;
+      bleStagingWriter = nullptr;
+      bleFlushBufferBusy = false;
+      break;
+
+   case BLE_JOB_RESET:
+      resetAll(true);
+      ESP.restart();
+      break;
+   }
+}
+
+void bleWorkerTask(void *) {
+   BleJob job;
+   for (;;) {
+      if (xQueueReceive(bleJobQueue, &job, portMAX_DELAY) != pdTRUE)
+         continue;
+      spiLock();
+      bleRunJob(job);
+      spiUnlock();
+      blePendingJobs--;
+   }
+}
+
+void bleWorkerInit() {
+   if (bleJobQueue)
+      return;
+   spiMutex = xSemaphoreCreateRecursiveMutex();
+   bleJobQueue = xQueueCreate(8, sizeof(BleJob));
+   xTaskCreate(bleWorkerTask, "bleWorker", 6144, nullptr, 2, nullptr);
+}
+
+// After setup mode: let queued jobs finish, then release the upload buffers
+void bleWorkerShutdown() {
+   unsigned long waitStart = millis();
+   while (blePendingJobs > 0 && millis() - waitStart < 30000) {
+      delay(10);
+   }
+   // An unfinished upload must not leave a half-written OTA partition or staging writer behind
+   if (bleUploadActive || fwUpdateInProgress) {
+      Serial.println("[BLE] Setup mode ended during an upload, aborting it");
+      bleUploadActive = false;
+      if (blePostJob(BLE_JOB_ABORT)) {
+         waitStart = millis();
+         while (blePendingJobs > 0 && millis() - waitStart < 5000) {
+            delay(10);
+         }
+      }
+   }
+   free(bleWriteBuffer);
+   bleWriteBuffer = nullptr;
+   free(bleFlushBuffer);
+   bleFlushBuffer = nullptr;
+}
 
 // Download url into fileName. Returns DL_OK, DL_NOT_MODIFIED or a DL_ERR_* code.
 // On DL_OK, downloadedLength holds the byte count and tempLastModified / tempDownloadCrc
@@ -2247,6 +2449,7 @@ bool updateDisplayAsync(String functionName) {
 
 void runSetupMode() {
    Serial.println("[MAIN] Setup Mode Triggered");
+   bleWorkerInit();
 
    unsigned long setupModeStart = millis();
    unsigned long bleConnectedTime = 0;
@@ -2334,11 +2537,13 @@ void runSetupMode() {
          applyPending = false;
          bleImageApplied = true;
          Serial.println("[MAIN] Applying new image within setup mode...");
+         spiLock();
          powerSupplyDisplay(true);
          if (settings.autoRotation) {
             accUpdateOrient();
          }
          setImageFromFS(IMAGE_FILE);
+         spiUnlock();
       }
 
       if (forceExitSetup) {
@@ -2346,7 +2551,7 @@ void runSetupMode() {
          break;
       }
 
-      if (!isBleClientConnected) {
+      if (!isBleClientConnected && !bleUploadActive && !fwUpdateInProgress) {
          if (millis() - lastDisconnectTime > SETUP_MODE_TIMEOUT * 1000) {
             Serial.printf("[MAIN] No BLE connection for %ds. Switching to fetch/refresh mode.\n", SETUP_MODE_TIMEOUT);
             break;
@@ -2683,6 +2888,7 @@ void setup() {
 
       Serial.println("[MAIN] Setup Mode Completed or Timeout");
       BleInit(CLIENT_ID, false); // Stop BLE advertising to save memory
+      bleWorkerShutdown();
       // Always proceed to loop to fetch URL or refresh picture
       downloadStart = true;
       tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsafe, 0);
