@@ -83,6 +83,7 @@ struct Settings
    String httpAuthUser;
    String httpAuthPassword;
    String lastModified;
+   uint32_t downloadCrc; // CRC32 of the last rendered download, 0 = none
    int imageMode;
    bool motionWakeup;
    bool chargerMode;
@@ -91,6 +92,7 @@ struct Settings
    bool autoRotation;
    bool forceDownload;
    bool skipSetupMode;
+   bool imageValid; // IMAGE_FILE holds a complete image
 };
 
 struct SystemData

@@ -101,6 +101,14 @@ Alle Einstellungen liegen im NVS-Namespace `settings` (Partition `nvs`, siehe `p
 - `initialized`: First Boot Indicator
 - `battWarn`, `wifiWarn`, `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`
 - `downloadUrl`, `lastModified`, `httpAuthUser`, `httpAuthPass`, `settingsUrl`, `settingsLastMod`
+- `dlCrc`: CRC32 of the last rendered image download, `imgValid`: `tmp.bmp` holds a complete image
+
+### Image download
+
+- The image request sends `If-Modified-Since` (from the last rendered download); `304 Not Modified` skips the refresh. If the server sends no `Last-Modified`, a CRC32 of the downloaded bytes is compared with the last rendered one instead, so an unchanged image is not redrawn.
+- Redirects (also between `http` and `https`) are followed. Chunked responses and responses without `Content-Length` are supported.
+- Only `200` and `304` count as success. Network errors and `5xx` are retried (up to 6 attempts); `4xx`, oversized downloads and undecodable images are not.
+- The external flash holds two fixed-size files, created once at boot: `download.bin` (raw download, up to 2 MB on 7", 6 MB on 13") and `tmp.bmp` (the processed image that gets rendered). If they cannot be created, the external flash is erased once and the files are recreated.
 
 > **First Boot Initialization**: Beim ersten Start (oder wenn `initialized` fehlt) wird der Namespace bereinigt und mit sinnvollen Standardwerten (z.B. Timeout = 3600s) initialisiert.
 
