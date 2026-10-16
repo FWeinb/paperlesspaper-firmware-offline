@@ -8,6 +8,8 @@ export class DeviceBleInterface {
     this.MODE_UUID = "10000002-0000-0000-0000-000000000001";
     this.UPLOAD_DATA_UUID = "10000003-0000-0000-0000-000000000001"; // WRITE_NR
     this.UPLOAD_CMD_UUID = "10000004-0000-0000-0000-000000000001"; // WRITE
+    this.STATUS_ERROR = 0xffff; // upload status read from UPLOAD_CMD: last upload failed
+    this.STATUS_BUSY = 0xfffe; // upload status read from UPLOAD_CMD: device still writing to flash
     this.TIMEOUT_UUID = "10000005-0000-0000-0000-000000000001";
     this.HTTP_AUTH_USER_UUID = "10000007-0000-0000-0000-000000000001"; // READ/WRITE
     this.HTTP_AUTH_PASS_UUID = "10000008-0000-0000-0000-000000000001"; // READ/WRITE
@@ -485,15 +487,7 @@ export class DeviceBleInterface {
     
     try {
       this.onUploadProgress(isFirmware ? 'firmware' : 'image', 0);
-      
-      if (!isFirmware) {
-        try {
-          const modeChar = await this.settingsService.getCharacteristic(this.MODE_UUID);
-          await modeChar.writeValue(this.encodeText("0"));
-        } catch (err) {
-          console.warn("Modus konnte nicht auf BLE gesetzt werden:", err);
-        }
-      }
+      // The device switches to image mode 0 (BLE) itself once the upload is complete and valid
 
       const dataChar = await this.settingsService.getCharacteristic(this.UPLOAD_DATA_UUID);
       const cmdChar = await this.settingsService.getCharacteristic(this.UPLOAD_CMD_UUID);
@@ -534,6 +528,9 @@ export class DeviceBleInterface {
         let statusView = await cmdChar.readValue();
         let ramBytes = statusView.getUint16(0, true);
 
+        if (ramBytes === this.STATUS_ERROR) {
+          throw new Error("Das Gerät konnte die Daten nicht speichern. Bitte erneut versuchen.");
+        }
         if (ramBytes === bytesToSend) {
           await cmdChar.writeValue(this.encodeText("FLUSH"));
           offset = windowEnd;
@@ -560,12 +557,10 @@ export class DeviceBleInterface {
         this.onStatusChange("Beende Firmware Update & Neustart...", "text-blue-500");
         await cmdChar.writeValue(this.encodeText("END_FW"));
         
-        // Wait briefly and verify if firmware reported an error
-        await new Promise((r) => setTimeout(r, 100));
+        // Wait until the device has verified the firmware; on success it reboots and the read fails
         try {
-          const statusView = await cmdChar.readValue();
-          const statusVal = statusView.getUint16(0, true);
-          if (statusVal === 0xFFFF) {
+          const statusVal = await this.waitForDeviceIdle(cmdChar);
+          if (statusVal === this.STATUS_ERROR) {
             throw new Error("Firmware-Integritätsprüfung auf dem Gerät fehlgeschlagen. Versuche es noch einmal.");
           }
         } catch (e) {
@@ -583,8 +578,11 @@ export class DeviceBleInterface {
       } else {
         this.onStatusChange("Speichere im Flash...", "text-blue-500");
         await cmdChar.writeValue(this.encodeText("END"));
+        const statusVal = await this.waitForDeviceIdle(cmdChar);
+        if (statusVal === this.STATUS_ERROR) {
+          throw new Error("Das Gerät hat das Bild abgelehnt (unvollständig oder falsche Größe). Das bisherige Bild bleibt erhalten.");
+        }
         this.onStatusChange("Aktualisiere das Display...", "text-blue-500");
-        await new Promise((r) => setTimeout(r, 500));
         await cmdChar.writeValue(this.encodeText("APPLY"));
         this.onStatusChange("Upload abgeschlossen! 🚀", "text-green-600");
       }
@@ -593,6 +591,18 @@ export class DeviceBleInterface {
       this.onStatusChange(`Fehler beim ${isFirmware ? 'Firmware ' : ''}Upload: ` + error.message, "text-red-500");
       throw error;
     }
+  }
+
+  // Poll the upload status until the device has finished its queued flash work.
+  // Returns the final status (STATUS_ERROR on failure). Firmware without a busy status returns immediately.
+  async waitForDeviceIdle(cmdChar, timeoutMs = 30000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const statusVal = (await cmdChar.readValue()).getUint16(0, true);
+      if (statusVal !== this.STATUS_BUSY) return statusVal;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error("Zeitüberschreitung: Gerät hat das Speichern nicht abgeschlossen.");
   }
 
   async uploadImage(buffer) {

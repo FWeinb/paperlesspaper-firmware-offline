@@ -185,7 +185,7 @@ Verwaltet alle Einstellungen und kümmert sich um den Upload von Bildern und Fir
 | `10000001-...` | **Download URL** | Read, Write | HTTP URL für den Bild-Download. Bei Eingabe einer URL wechselt das Gerät automatisch in den URL-Modus (Image Mode = 1). |
 | `10000002-...` | **Image Mode** | Read, Write | Modus: `0` = Lokales Bild (BLE), `1` = Web URL. |
 | `10000003-...` | **Upload Data** | Write | Stream für Binärdaten (Bilder / Firmware). Das 1. Byte ist der CRC8 des restlichen Payloads. |
-| `10000004-...` | **Upload CMD** | Read, Write | Befehlskanal (siehe "Befehle" unten). Bei "Read" liefert er die aktuell im RAM befindlichen Bytes (für den Bild-Upload Checkpoint-Mechanismus). |
+| `10000004-...` | **Upload CMD** | Read, Write | Befehlskanal (siehe "Befehle" unten). Bei "Read" liefert er die aktuell im RAM befindlichen Bytes (für den Checkpoint-Mechanismus), `0xFFFE` solange das Gerät noch in den Flash schreibt (nur bei leerem RAM-Puffer) bzw. `0xFFFF` wenn der letzte Upload fehlgeschlagen ist (uint16, little endian). |
 | `10000005-...` | **Timeout** | Read, Write | Sleep Timeout in Sekunden (z.B. `3600`). |
 | `1000000b-...` | **Settings URL** | Read, Write | Optionale HTTP(s) URL zu einem JSON-Config File. |
 | `10000007-...` | **HTTP User** | Read, Write | Benutzername für HTTP Basic Auth. |
@@ -207,17 +207,22 @@ Der CMD Channel verarbeitet Strings, um Uploads zu steuern oder das Gerät zurü
 
 #### Ablauf: Bild Upload (BMP)
 Bilder werden in kleine "Checkpoints" (Fenster) unterteilt, um Paketverlusten vorzubeugen:
-1. `START`: Bereitet den Flash-Speicher (`tmp.bmp`) und den RAM-Puffer für ein neues Bild vor.
+1. `START`: Bereitet den RAM-Puffer und den Zwischenspeicher (`download.bin`) für ein neues Bild vor. Das aktuelle Bild und der Bildmodus bleiben unverändert.
 2. Senden der Daten (über `Upload Data`): In Chunks à z.B. 238 Bytes + 1 Byte CRC.
-3. Nach einem Checkpoint-Fenster (z.B. 80 Pakete) liest die Web-UI den `Upload CMD` (Read). Stimmen die gesendeten Bytes mit dem im ESP gepufferten Wert überein, wird der Befehl `FLUSH` gesendet, um die Daten aus dem RAM in den Flash zu schreiben. Bei einem Fehler (Bytes fehlen) sendet die UI `CLEAR`, um den RAM zu leeren, und überträgt das Fenster erneut.
-4. `END`: Schließt die Datei ab.
-5. `APPLY`: Zeigt das Bild direkt auf dem Display an.
+3. Nach einem Checkpoint-Fenster (z.B. 80 Pakete) liest die Web-UI den `Upload CMD` (Read). Stimmen die gesendeten Bytes mit dem im ESP gepufferten Wert überein, wird der Befehl `FLUSH` gesendet, um die Daten aus dem RAM in den Flash zu schreiben (im Hintergrund; das Gerät empfängt währenddessen schon das nächste Fenster in einen zweiten Puffer). Bei einem Fehler (Bytes fehlen) sendet die UI `CLEAR`, um den RAM zu leeren, und überträgt das Fenster erneut.
+4. `END`: Prüft die Größe (genau `Breite × Höhe / 2` Bytes). Nur dann wird das Bild nach `tmp.bmp` kopiert und der Bildmodus auf `0` (BLE) gestellt. Die Web-UI liest danach den `Upload CMD`, bis er nicht mehr `0xFFFE` liefert; `0xFFFF` bedeutet abgelehnt (altes Bild und Modus bleiben erhalten).
+5. `APPLY`: Zeigt das Bild direkt auf dem Display an (wird ignoriert, wenn `END` fehlgeschlagen ist).
+
+Es ist immer nur eine BLE-Verbindung gleichzeitig möglich: Während ein Client verbunden ist, wird nicht advertised; weitere Verbindungsversuche werden abgewiesen.
+
+Flash-Schreibvorgänge laufen in einem eigenen Worker-Task, nicht im BLE-Callback, damit die Verbindung während langer Lösch-/Schreibvorgänge nicht abreißt.
 
 #### Ablauf: Firmware Upload (OTA via BLE)
 Die Firmware wird direkt in die OTA-Partition geflasht. Es gibt keinen Checkpoint-Mechanismus in der Web-UI, dafür wartet sie auf das erfolgreiche Senden jedes einzelnen Pakets:
 1. `START_FW`: Initialisiert den OTA-Prozess (`Update.begin()`).
-2. Senden der Daten (über `Upload Data`): In Chunks. Jeder Chunk wird vom ESP per CRC geprüft und direkt mit `Update.write()` geschrieben.
-3. `END_FW`: Schließt den OTA-Prozess ab (`Update.end()`) und startet das Gerät automatisch in der neuen Firmware neu. Einstellungen (WLAN, URL, …) bleiben dabei erhalten.
+2. Senden der Daten (über `Upload Data`): Gleicher Checkpoint-Mechanismus wie beim Bild (`FLUSH` / `CLEAR`); jedes Fenster wird im Worker-Task mit `Update.write()` geschrieben.
+3. `END_FW`: Schließt den OTA-Prozess ab (`Update.end()`) und startet das Gerät automatisch in der neuen Firmware neu. Einstellungen (WLAN, URL, …) bleiben dabei erhalten. Schlägt die Prüfung fehl, liefert `Upload CMD` `0xFFFF`.
+4. Bricht die Verbindung während des Updates ab, wird es verworfen (`Update.abort()`).
 
 #### Ablauf: Firmware Upload (via USB / Web Serial)
 Falls Bluetooth nicht verfügbar ist oder du das Gerät lieber direkt per Kabel flashen möchtest, unterstützt die Web-UI das Flashen über die Web Serial API (mittels `esptool-js`):
