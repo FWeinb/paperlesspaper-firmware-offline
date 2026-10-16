@@ -92,6 +92,8 @@
 #define BLE_BUFFER_SIZE 19200
 
 #define DEFAULT_SLEEP 3600 // Default time how long to sleep after update
+#define MIN_SLEEP_TIMEOUT 60     // Lower bound for a configured sleep timeout (seconds)
+#define MAX_SLEEP_TIMEOUT 604800 // Upper bound for a configured sleep timeout (7 days)
 #define FAILSAVE_TIMER 180 // Time to shutdown the device if no reaction or hangup
 #define SLEEP_RECALCULATION_PERIOD_SECONDS 30
 #define SETUP_MODE_TIMEOUT 30 // seconds to wait in setup mode for BLE connection before switching to fetch/refresh mode
@@ -208,6 +210,7 @@ void ledBlink(int timeout, bool on, int dimValue = 100);
 void debugFS(void);
 bool BleInit(String deviceId, bool enable);
 int storeSleepTimeMem(int updateTime = 0);
+int clampSleepTimeout(int seconds);
 void gotToDeepSleep(int seconds, bool showScreen = true, bool motionWake = true);
 int accInit(bool skipInit = false);
 bool accIntSet(int sensity);
@@ -956,11 +959,8 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
          Serial.printf("[BLE] Set Image Mode: %d\n", settings.imageMode);
       }
       else if (uuidStr == "10000005-0000-0000-0000-000000000001") {
-         settings.timeout = atoi(pCharacteristic->getValue().c_str());
+         settings.timeout = clampSleepTimeout(atoi(pCharacteristic->getValue().c_str()));
          Serial.printf("[BLE] Set Timeout/Sleep: %d\n", settings.timeout);
-      }
-      else if (uuidStr == "10000006-0000-0000-0000-000000000001") {
-         String strVal = pCharacteristic->getValue().c_str();
       }
       else if (pCharacteristic->getUUID().toString() == "1000000a-0000-0000-0000-000000000001") {
          String val = pCharacteristic->getValue().c_str();
@@ -980,17 +980,10 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
          Serial.printf("[BLE] Set Settings URL: %s\n", settings.settingsUrl.c_str());
          settings.settingsLastModified = ""; // Reset cache on new URL
       }
-      else if (pCharacteristic->getUUID().toString() == "10000007-0000-0000-0000-000000000001") {
-      }
       else if (uuidStr == "10000009-0000-0000-0000-000000000001") {
          String strVal = pCharacteristic->getValue().c_str();
          settings.motionWakeup = (strVal == "1" || strVal == "true");
          Serial.printf("[BLE] Set Motion Wakeup: %d\n", settings.motionWakeup);
-      }
-      else if (uuidStr == "1000000a-0000-0000-0000-000000000001") {
-         String strVal = pCharacteristic->getValue().c_str();
-         settings.chargerMode = (strVal == "1" || strVal == "true");
-         Serial.printf("[BLE] Set Charger Mode: %d\n", settings.chargerMode);
       }
       else if (uuidStr == "10000004-0000-0000-0000-000000000001") {
          String cmd = pCharacteristic->getValue().c_str();
@@ -1498,6 +1491,13 @@ String urldecode(String str) {
       yield();
    }
    return encodedString;
+}
+
+int clampSleepTimeout(int seconds) {
+   int clamped = constrain(seconds, MIN_SLEEP_TIMEOUT, MAX_SLEEP_TIMEOUT);
+   if (clamped != seconds)
+      Serial.printf("[MAIN] Timeout %d out of range, clamped to %d\n", seconds, clamped);
+   return clamped;
 }
 
 int storeSleepTimeMem(int updateTime) {
@@ -2238,7 +2238,7 @@ void runSetupMode() {
 
       if (!isBleClientConnected) {
          if (millis() - lastDisconnectTime > SETUP_MODE_TIMEOUT * 1000) {
-            Serial.println("[MAIN] No BLE connection for 60s. Switching to fetch/refresh mode.");
+            Serial.printf("[MAIN] No BLE connection for %ds. Switching to fetch/refresh mode.\n", SETUP_MODE_TIMEOUT);
             break;
          }
       }
@@ -2356,7 +2356,7 @@ void fetchRemoteSettings() {
          bool changed = false;
 
          if (doc["timeout"].is<int>()) {
-            settings.timeout = doc["timeout"];
+            settings.timeout = clampSleepTimeout(doc["timeout"].as<int>());
             changed = true;
          }
          if (doc["motionWakeup"].is<bool>()) {

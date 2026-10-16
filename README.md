@@ -96,7 +96,7 @@ Offline first Firmware for an ESP32-C6 based E-Paper display device, featuring W
 Alle Einstellungen liegen im NVS-Namespace `settings` (Partition `nvs`, siehe `part.csv`):
 
 - `ssid`, `pss`: WiFi Name / Passwort
-- `timeout`: Sleep Time
+- `timeout`: Sleep Time in seconds (clamped to 60 – 604800, i.e. 1 min – 7 days)
 - `orientation`: Display Orientation Store
 - `initialized`: First Boot Indicator
 - `battWarn`, `wifiWarn`, `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`
@@ -143,7 +143,7 @@ Liest den aktuellen Status des Geräts (WLAN etc.).
 |------|------|------------|--------------|
 | `4c578d4c-...` | **WiFi Connected** | Read, Notify | Gibt `1` zurück, wenn mit WLAN verbunden, sonst `0`. |
 | `4c578d4d-...` | **WiFi Info** | Read, Notify | JSON-String mit Verbindungsdetails (z.B. `{"ip": "192...", "rssi": -65}`). |
-| `4c578d4e-...` | **System Info** | Read, Notify | JSON-String mit Systemdaten (Batteriespannung in mV, USB-Status, Ladestatus). |
+| `60000001-7b0e-11ed-a1eb-0242ac120002` | **System Info** | Read, Notify | JSON-String mit Systemdaten (Batteriespannung in mV, USB-Status, Ladestatus). |
 | `5131a3fc-...` | **WiFi Scan** | Read, Notify | Liste gefundener WLANs. Wird asynchron befüllt, wenn das Kommando `SCAN_WIFI` über den Upload CMD Kanal gesendet wurde. Format: `SSID´RSSI´´SSID2´RSSI2´´`. |
 
 ### 2. WiFi Data Service
