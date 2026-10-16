@@ -674,9 +674,7 @@ bool waitDisplayComplete(bool quick) {
          return true;
          break;
       }
-#if DEBUG
-      Serial.println("[EPD] Wait for Display...");
-#endif
+      DEBUG_LOG("[EPD] Wait for Display...\n");
       delay(500);
    }
    return false;

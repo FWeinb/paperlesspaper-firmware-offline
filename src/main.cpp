@@ -27,23 +27,6 @@
 #include "epaper_display.h"
 #include "types.h"
 
-#if DEBUG
-#define PRINTS(s)         \
-   do {                   \
-      Serial.print(F(s)); \
-   }                      \
-   while (false)
-#define PRINT(s, v)       \
-   do {                   \
-      Serial.print(F(s)); \
-      Serial.print(v);    \
-   }                      \
-   while (false)
-#else
-#define PRINTS(s)
-#define PRINT(s, v)
-#endif
-
 #ifdef ARDUHAL_LOG_LEVEL
 #undef ARDUHAL_LOG_LEVEL
 #define ARDUHAL_LOG_LEVEL ARDUHAL_LOG_LEVEL_NONE
@@ -130,11 +113,6 @@
 #define DL_ERR_FLASH (-7)       // download file missing (no retry)
 #define DL_ERR_SIZE (-8)        // received byte count does not match Content-Length (retry)
 
-#if DEBUG
-const bool DEBUG_FLAG = true;
-#else
-const bool DEBUG_FLAG = false;
-#endif
 
 WifiSettings wifiSettings = {
     .ssid = "",
@@ -297,9 +275,7 @@ bool copyFlashFile(SerialFlashFile &inFile, uint32_t rawLength, SerialFlashFile 
 
 // Debug builds: log the minimum free stack (bytes) the calling task has had so far
 void logStackHighWater(const char *where) {
-#if DEBUG
-   Serial.printf("[STACK] %s: %s min free %u bytes\n", where, pcTaskGetName(NULL), (unsigned)uxTaskGetStackHighWaterMark(NULL));
-#endif
+   DEBUG_LOG("[STACK] %s: %s min free %u bytes\n", where, pcTaskGetName(NULL), (unsigned)uxTaskGetStackHighWaterMark(NULL));
 }
 
 void spiLock() {
@@ -1076,8 +1052,7 @@ bool powerSupplyDisplay(bool enable) {
 void WiFiEvent(WiFiEvent_t event) {
    switch (event) {
    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-      if (DEBUG_FLAG)
-         Serial.println("[NETWORK] WiFi connected");
+      DEBUG_LOG("[NETWORK] WiFi connected\n");
       Serial.printf("[NETWORK] IP address: ");
       Serial.println(WiFi.localIP());
 
@@ -1145,8 +1120,7 @@ void ledBlink(int timeout, bool on, int dimValue) {
    if (dimValue < 0)
       dimValue = 0;
    systemData.ledDimValue = (dimValue * 255) / 100;
-   if (DEBUG_FLAG)
-      Serial.printf("[LED] Set DIM: %d Set Time: %d On: %d (dimInput:%d)\n", systemData.ledDimValue, timeout, on, dimValue);
+   DEBUG_LOG("[LED] Set DIM: %d Set Time: %d On: %d (dimInput:%d)\n", systemData.ledDimValue, timeout, on, dimValue);
 
    if (on) {
       if (timeout <= 0) {
@@ -1276,9 +1250,7 @@ void restoreSettings() {
    settings.autoRotation = settingsStore.getBool("autoRotation", true);
    settings.telemetry = settingsStore.getBool("telemetry", true);
    Serial.println("[MEM] Settings restored");
-   if (DEBUG_FLAG) {
-      Serial.printf("[MEM] Settings - BatteryWarning: %d WifiWarning: %d SleepDisabled: %d ImageMode: %d MotionWakeup: %d ChargerMode: %d\n", settings.showBatteryWarning, settings.showWifiWarning, settings.sleepDisabled, settings.imageMode, settings.motionWakeup, settings.chargerMode);
-   }
+   DEBUG_LOG("[MEM] Settings - BatteryWarning: %d WifiWarning: %d SleepDisabled: %d ImageMode: %d MotionWakeup: %d ChargerMode: %d\n", settings.showBatteryWarning, settings.showWifiWarning, settings.sleepDisabled, settings.imageMode, settings.motionWakeup, settings.chargerMode);
 }
 
 // loadImageFromWeb removed from here since it's defined later
@@ -2117,23 +2089,19 @@ int storeSleepTimeMem(int updateTime) {
    if (updateTime > 0) {
       if (returnSleepTime != updateTime) {
          systemData.newSleepTimeSet = true;
-         if (DEBUG_FLAG)
-            Serial.printf("[MEM] Update Sleep Time to %d\n", updateTime);
+         DEBUG_LOG("[MEM] Update Sleep Time to %d\n", updateTime);
          settingsStore.putInt("timeout", updateTime);
       }
       returnSleepTime = updateTime;
    }
    else {
-      if (DEBUG_FLAG)
-         Serial.printf("[MEM] Get Sleep Time: %d\n", returnSleepTime);
+      DEBUG_LOG("[MEM] Get Sleep Time: %d\n", returnSleepTime);
    }
    return returnSleepTime;
 }
 
 void debugFS() {
-#if DEBUG
-   Serial.printf("[MAIN] SPIFFS usage %d/%d heap free: %d/%d\n", SPIFFS.usedBytes(), SPIFFS.totalBytes(), ESP.getFreeHeap(), ESP.getHeapSize());
-#endif
+   DEBUG_LOG("[MAIN] SPIFFS usage %d/%d heap free: %d/%d\n", SPIFFS.usedBytes(), SPIFFS.totalBytes(), ESP.getFreeHeap(), ESP.getHeapSize());
 }
 
 void sdTest() {
@@ -2164,8 +2132,7 @@ void sdTest() {
 
 bool sdInit() {
    if (systemData.sdReady) {
-      if (DEBUG_FLAG)
-         Serial.println("[SD] skip, init is done...");
+      DEBUG_LOG("[SD] skip, init is done...\n");
       return true;
    }
    if (!sd.begin(SdSpiConfig(CS_SD_PIN, SHARED_SPI, DISPLAY_SPI_SPEED))) {
@@ -2272,16 +2239,7 @@ void setDeviceUid() {
    byte mac[6];
    WiFi.mode(WIFI_STA);
    WiFi.macAddress(mac);
-   if (DEBUG_FLAG) {
-      Serial.print("[WIFI] MAC: ");
-      for (int i = 0; i < 6; i++) {
-         Serial.printf("%02X", mac[i]);
-         if (i < 5) {
-            Serial.print(":");
-         }
-      }
-      Serial.println();
-   }
+   DEBUG_LOG("[WIFI] MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
    String uniq = setLeadingZero(String(mac[0], HEX)) + setLeadingZero(String(mac[1], HEX)) + setLeadingZero(String(mac[2], HEX)) + setLeadingZero(String(mac[3], HEX)) + setLeadingZero(String(mac[4], HEX)) + setLeadingZero(String(mac[5], HEX));
    const uint8_t MSG_BUF_SIZE = 100;
    char mesg[MSG_BUF_SIZE] = {'\0'}; // Serial input message buffer
@@ -2376,28 +2334,24 @@ int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly
    }
 
    if (systemData.wakeupCause == wakeup_reason_t::TIMER) {
-      if (DEBUG_FLAG)
-         Serial.printf("[SLEEP] no manual wakeup (timer) - using full wakeup period...\n");
+      DEBUG_LOG("[SLEEP] no manual wakeup (timer) - using full wakeup period...\n");
       previousWakeup = now;
       return defaultTimeout;
    }
    if (systemData.wakeupCause == wakeup_reason_t::BUTTON) {
       // TODO: cloud time feedback is needed here to calculate new wakeup
-      if (DEBUG_FLAG)
-         Serial.printf("[SLEEP] button wakeup - not able to calculate new sleep internally...\n");
+      DEBUG_LOG("[SLEEP] button wakeup - not able to calculate new sleep internally...\n");
       previousWakeup = now;
       return defaultTimeout;
    }
    if (forceReset) {
-      if (DEBUG_FLAG)
-         Serial.printf("[SLEEP] force reset - using full wakeup period...\n");
+      DEBUG_LOG("[SLEEP] force reset - using full wakeup period...\n");
       previousWakeup = now;
       return defaultTimeout;
    }
 
    if (previousWakeup.tv_sec > now.tv_sec) {
-      if (DEBUG_FLAG)
-         Serial.printf("[SLEEP] detected invalid previous wakeup, resetting...\n");
+      DEBUG_LOG("[SLEEP] detected invalid previous wakeup, resetting...\n");
       previousWakeup = timeval{
           .tv_sec = 0,
           .tv_usec = 0};
@@ -2406,8 +2360,7 @@ int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly
    time_t diff = now.tv_sec - previousWakeup.tv_sec;
 
    if (diff <= 0) {
-      if (DEBUG_FLAG)
-         Serial.printf("[SLEEP] detected non positive sleep difference, resetting...\n");
+      DEBUG_LOG("[SLEEP] detected non positive sleep difference, resetting...\n");
       previousWakeup = now;
       diff = 0;
    }
@@ -2428,11 +2381,9 @@ wakeup_reason_t getWakeupReason() {
    int resetReason0 = rtc_get_reset_reason(0);
    int resetReason1 = rtc_get_reset_reason(1);
    int wakeupReason = esp_sleep_get_wakeup_cause();
-#if DEBUG
-   Serial.printf("[WAKE] Reset Reason 0: %d\n", resetReason0);
-   Serial.printf("[WAKE] Reset Reason 1: %d\n", resetReason1);
-   Serial.printf("[WAKE] Wake Reason: %d\n", wakeupReason);
-#endif
+   DEBUG_LOG("[WAKE] Reset Reason 0: %d\n", resetReason0);
+   DEBUG_LOG("[WAKE] Reset Reason 1: %d\n", resetReason1);
+   DEBUG_LOG("[WAKE] Wake Reason: %d\n", wakeupReason);
    if (wakeupReason == esp_sleep_wakeup_cause_t::ESP_SLEEP_WAKEUP_UNDEFINED && resetReason0 == 1 && resetReason1 == 1) {
       Serial.printf("[WAKE] Got Button Wakeup or Power Loss Wakeup\n");
       return wakeup_reason_t::BUTTON;
@@ -2487,8 +2438,7 @@ int accInit(bool skipInit) {
    int orientation = 0;
    if (!skipInit) {
       if (myIMU.begin(6.25, 2, false) == IMU_SUCCESS) {
-         if (DEBUG_FLAG)
-            Serial.println("[ACC] initialized.");
+         DEBUG_LOG("[ACC] initialized.\n");
       }
       else {
          Serial.println("[ACC] Failed to initialize.");
@@ -2551,8 +2501,8 @@ int accInit(bool skipInit) {
       orientation = 3;
    }
 
-   if (DEBUG_FLAG && !skipInit)
-      Serial.printf("[ACC] Values: X:%d Y:%d Z:%d Orient: %d \n", acc_x, acc_y, acc_z, orientation);
+   if (!skipInit)
+      DEBUG_LOG("[ACC] Values: X:%d Y:%d Z:%d Orient: %d \n", acc_x, acc_y, acc_z, orientation);
 
    // Put IMU back into standby
    myIMU.resetInterrupt();
@@ -3105,8 +3055,7 @@ void setup() {
 
    systemData.vddValue = readVDD(false);
    if (!systemData.usbConnected && systemData.vddValue < 4000) {
-      if (DEBUG_FLAG)
-         Serial.printf("[MAIN] Bat low protection: %dmV\n", systemData.vddValue);
+      DEBUG_LOG("[MAIN] Bat low protection: %dmV\n", systemData.vddValue);
       analogWrite(LED_PIN, LED_DIM_VALUE);
       gotToDeepSleep(86000, false, false);
    }
@@ -3147,8 +3096,7 @@ void setup() {
    ledBlink(500, true);
 
    Serial.printf("[MAIN] INIT Device V: %s\n", firmwareVersion);
-   if (DEBUG_FLAG)
-      Serial.printf("[MAIN] Current counter value: %u VDD: %d\n", StartCounter, systemData.vddValue);
+   DEBUG_LOG("[MAIN] Current counter value: %u VDD: %d\n", StartCounter, systemData.vddValue);
    if (!SPIFFS.begin(true)) {
       Serial.println("[MEM] SPIFFS initialisation failed!");
    }
@@ -3172,8 +3120,7 @@ void setup() {
    setDisplayData(CLIENT_ID, systemData.vddValue);
    // TODO: maybe do a function to generally check updated mem values
    float temperature = temperatureRead();
-   if (DEBUG_FLAG)
-      Serial.printf("[MAIN] Temp Main: %.2f °C\n", temperature);
+   DEBUG_LOG("[MAIN] Temp Main: %.2f °C\n", temperature);
    if (temperature < 21.0) {
       Serial.printf("[MAIN] Low Temp detected: %.2f °C - disable quick refresh\n", temperature);
       displaySetQuickRefresh(false);
