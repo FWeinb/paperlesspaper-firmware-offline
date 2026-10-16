@@ -153,6 +153,69 @@ void displayTypeDetect() {
 #endif
 }
 
+// Error badge (red square with "!") drawn into the top right corner of the image by setImageFromFS
+static bool errorBadge = false;
+
+void displaySetErrorBadge(bool enable) {
+   errorBadge = enable;
+}
+
+// 7": the image buffer is landscape, but the frame is viewed like the text (rotationText), so draw the
+// badge with GFX in text rotation into the top right corner as the viewer sees it
+static void drawErrorBadge() {
+   const int size = EPD_WIDTH / 20;
+   const int margin = size / 2;
+   const int border = max(2, size / 16);
+   const int barHalfWidth = max(2, size / 12);
+   display.setRotation(displaySettings.rotationText);
+   const int x0 = display.width() - margin - size;
+   const int y0 = margin;
+   display.fillRect(x0, y0, size, size, GxEPD_BLACK);
+   display.fillRect(x0 + border, y0 + border, size - 2 * border, size - 2 * border, GxEPD_RED);
+   const int barX = x0 + size / 2 - barHalfWidth;
+   display.fillRect(barX, y0 + size * 20 / 100, 2 * barHalfWidth, size * 42 / 100, GxEPD_WHITE);
+   display.fillRect(barX, y0 + size * 72 / 100, 2 * barHalfWidth, size * 12 / 100, GxEPD_WHITE);
+   display.setRotation(displaySettings.rotationPicture);
+}
+// 13": text and picture share the rotation, so image coordinates are what the viewer sees.
+// The badge is applied to the raw pixel data before the 180° flip.
+
+// Returns the palette nibble for image pixel (x, y): badge color inside the badge, else the image's nibble
+static uint8_t errorBadgeNibble(int x, int y, int imageWidth, uint8_t nibble) {
+   const int size = EPD_WIDTH / 20;
+   const int margin = size / 2;
+   const int lx = x - (imageWidth - margin - size);
+   const int ly = y - margin;
+   if (lx < 0 || ly < 0 || lx >= size || ly >= size)
+      return nibble;
+   const int border = max(2, size / 16);
+   if (lx < border || ly < border || lx >= size - border || ly >= size - border)
+      return 0; // black
+   const int barHalfWidth = max(2, size / 12);
+   if (abs(lx - size / 2) < barHalfWidth) {
+      if ((ly >= size * 20 / 100 && ly < size * 62 / 100) || (ly >= size * 72 / 100 && ly < size * 84 / 100))
+         return 6; // white
+   }
+   return 3; // red
+}
+
+static bool errorBadgeRow(int y) {
+   const int size = EPD_WIDTH / 20;
+   return errorBadge && y >= size / 2 && y < size / 2 + size;
+}
+
+// Apply the badge to one line of packed 4-bit pixels (high nibble = left pixel) starting at image pixel xStart
+static void errorBadgeLine(uint8_t *buf, int bytes, int xStart, int y, int imageWidth) {
+   if (!errorBadgeRow(y))
+      return;
+   for (int b = 0; b < bytes; b++) {
+      int x = xStart + b * 2;
+      uint8_t high = errorBadgeNibble(x, y, imageWidth, buf[b] >> 4);
+      uint8_t low = errorBadgeNibble(x + 1, y, imageWidth, buf[b] & 0x0F);
+      buf[b] = (high << 4) | low;
+   }
+}
+
 void displaySetOverlayOption(DisplayInfoKey key, bool value) {
    switch (key) {
    case DisplayInfoKey::VERSION:
@@ -341,6 +404,8 @@ int setImageFromFS_7inch(String fileName) {
             }
          }
       }
+      if (errorBadge)
+         drawErrorBadge();
    }
    while (display.nextPage());
 
@@ -447,6 +512,7 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
             if (rotate180) {
                uint8_t tempLine[300];
                saveFile.read(tempLine, bytesPerHalfLine);
+               errorBadgeLine(tempLine, bytesPerHalfLine, srcHalf * bytesPerHalfLine * 2, lineInImage, physWidth);
                for (int b = 0; b < bytesPerHalfLine; b++) {
                   uint8_t origByte = tempLine[bytesPerHalfLine - 1 - b];
                   // swap nibbles: left pixel becomes right pixel, right pixel becomes left pixel
@@ -455,6 +521,7 @@ int setImageFromFS_13inch(String fileName, bool doRefresh) {
             }
             else {
                saveFile.read(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine);
+               errorBadgeLine(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine, srcHalf * bytesPerHalfLine * 2, lineInImage, physWidth);
             }
          }
          SPI.endTransaction();

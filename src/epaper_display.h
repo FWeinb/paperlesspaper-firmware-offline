@@ -55,6 +55,7 @@ void deinitDisplay();
 void displaySetRotation(int orientation);
 void displaySetQuickRefresh(bool enable, int refreshTime = 0, int wipeTime = 0);
 void displaySetOverlayOption(DisplayInfoKey key, bool value);
+void displaySetErrorBadge(bool enable);
 void displayTypeDetect();
 void displayOverlays(DisplayType &display, DisplayInfo displayData, bool invertColors, bool fullcolor = false);
 int setImageFromFS_7inch(String fileName);
