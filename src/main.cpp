@@ -192,6 +192,10 @@ SerialFlashFile rawOutFile;
 SerialFlashFile jpgInFile;
 SdFs sd;
 RTC_DATA_ATTR timeval previousWakeup = timeval{.tv_sec = 0, .tv_usec = 0};
+// Download failures (#15): keep the last image, retry with backoff, show an error badge after DL_FAIL_BADGE_AFTER failures
+#define DL_FAIL_BADGE_AFTER 3
+RTC_DATA_ATTR uint8_t dlFailCount = 0;         // consecutive failed downloads
+RTC_DATA_ATTR bool dlErrorShown = false;       // error badge or error text is on the display
 JPEGDEC jpeg;
 
 NimBLECharacteristic *wifiConnectedCharacteristic;
@@ -1807,6 +1811,20 @@ String urldecode(String str) {
    return encodedString;
 }
 
+// Seconds per retry step; build with -DDL_RETRY_UNIT=2 for a quick test (10 s, 30 s, 60 s)
+#ifndef DL_RETRY_UNIT
+#define DL_RETRY_UNIT 60
+#endif
+
+// Retry delay after the n-th consecutive download failure: 5, 15, then 30 min
+int downloadRetryDelay(int failCount) {
+   if (failCount <= 1)
+      return 5 * DL_RETRY_UNIT;
+   if (failCount == 2)
+      return 15 * DL_RETRY_UNIT;
+   return 30 * DL_RETRY_UNIT;
+}
+
 int clampSleepTimeout(int seconds) {
    int clamped = constrain(seconds, MIN_SLEEP_TIMEOUT, MAX_SLEEP_TIMEOUT);
    if (clamped != seconds)
@@ -2960,13 +2978,20 @@ void loop() {
       delay(25);
 
       int setSuccess = 0;
+      bool dlFailed = false;
       if (dlSuccess == 0 || dlSuccess == 1) { // 0 = downloaded/ok, 1 = not modified
+         if (dlFailCount > 0) {
+            Serial.printf("[DL] Recovered after %d failed attempt(s)\n", dlFailCount);
+            dlFailCount = 0;
+         }
          if (dlSuccess == 0 && bleImageApplied) {
             Serial.println("[IMAGE] Image was already applied during setup mode, skipping refresh.");
             setSuccess = 0;
+            dlErrorShown = false;
             commitDownloadCache();
          }
-         else if (dlSuccess == 0 || settings.imageMode == 0) {
+         else if (dlSuccess == 0 || settings.imageMode == 0 || dlErrorShown) {
+            // dlErrorShown: redraw even if not modified, to remove the error badge / text
             WiFi.disconnect(true);
             applyPendingOrientation();
             setSuccess = setImageFromFS(fileName);
@@ -2975,8 +3000,10 @@ void loop() {
                waitDisplayComplete(false);
                setSuccess = setImageFromFS(fileName);
             }
-            if (setSuccess == 0 && dlSuccess == 0) {
-               commitDownloadCache();
+            if (setSuccess == 0) {
+               dlErrorShown = false;
+               if (dlSuccess == 0)
+                  commitDownloadCache();
             }
          }
          else {
@@ -2985,8 +3012,30 @@ void loop() {
          }
       }
       else {
+         // Keep the last image on the display and retry sooner (#15)
+         dlFailed = true;
+         if (dlFailCount < 255)
+            dlFailCount++;
+         Serial.printf("[DL] Download failed (%d), %d failure(s) in a row\n", dlSuccess, dlFailCount);
+         WiFi.disconnect(true);
          applyPendingOrientation();
-         displaySetText("Error: Picture download failed, please try again", false);
+         if (!settings.imageValid) {
+            // Nothing to fall back to (no image yet, or the failed processing overwrote it)
+            if (!dlErrorShown) {
+               displaySetText("Error: Picture download failed, please try again", false);
+               dlErrorShown = true;
+            }
+         }
+         else if (dlFailCount == DL_FAIL_BADGE_AFTER) {
+            Serial.println("[IMAGE] Redrawing last image with error badge");
+            displaySetErrorBadge(true);
+            if (setImageFromFS(fileName) == 0)
+               dlErrorShown = true;
+            displaySetErrorBadge(false);
+         }
+         else {
+            Serial.println("[IMAGE] Keeping last image");
+         }
          setSuccess = -1;
       }
 
@@ -2996,12 +3045,12 @@ void loop() {
          gotToDeepSleep(0, false, false);
       }
       bool doMotionWake = (settings.imageMode == 1) ? settings.motionWakeup : false;
-      if (settings.timeout > 0) {
-         gotToDeepSleep(systemData.sleepPrediction, false, doMotionWake);
+      int sleepSeconds = (settings.timeout > 0) ? systemData.sleepPrediction : DEFAULT_SLEEP;
+      if (dlFailed && downloadRetryDelay(dlFailCount) < sleepSeconds) {
+         sleepSeconds = downloadRetryDelay(dlFailCount);
+         Serial.printf("[DL] Retrying in %d s\n", sleepSeconds);
       }
-      else {
-         gotToDeepSleep(DEFAULT_SLEEP, false, doMotionWake);
-      }
+      gotToDeepSleep(sleepSeconds, false, doMotionWake);
    }
 
    // Keep alive for setup mode / BLE configs
