@@ -103,13 +103,21 @@
 
 // SerialFlash cannot delete or resize files, so both files are created once with a fixed size and reused
 #define IMAGE_FILE "tmp.bmp"                                   // processed 4-bit image that gets rendered
-#define IMAGE_FILE_SIZE ((EPD_WIDTH * EPD_HEIGHT / 2) + 200)   // + room for a BMP header
+#define IMAGE_FILE_SIZE ((EPD_WIDTH * EPD_HEIGHT / 2) + 200)   // raw 4-bit rows (+ room for a BMP header from older firmware)
+#define ROTATE_FILE "rotate.bin"                               // RGB565 view of a portrait image before rotating it into IMAGE_FILE
+#define ROTATE_FILE_SIZE (EPD_WIDTH * EPD_HEIGHT * 2)
 #define DOWNLOAD_FILE "download.bin"                           // raw HTTP download (replaces the old tmp_raw.bin)
 #ifdef EPD_TYPE_13INCH
 #define DOWNLOAD_FILE_MAX (6 * 1024 * 1024) // fits a 24-bit 1600x1200 BMP
 #else
 #define DOWNLOAD_FILE_MAX (2 * 1024 * 1024) // fits a 24-bit 800x480 BMP
 #endif
+
+// processImageFile() results
+#define IMG_OK 0
+#define IMG_REJECTED 1     // unsupported or invalid image, IMAGE_FILE untouched
+#define IMG_FAILED 2       // failed while writing, IMAGE_FILE is broken
+#define JPEG_STRIP_ROWS 16 // max JPEG MCU height
 
 // downloadAndSaveFile() results
 #define DL_OK 0
@@ -212,11 +220,6 @@ uint32_t tempDownloadCrc = 0;
 uint32_t downloadedLength = 0; // real byte count in DOWNLOAD_FILE (its allocated size is larger)
 uint32_t jpgInputLength = 0;
 int StartCounter = 0;
-int strip_y_start = 0;
-int strip_height = 0;
-int decodedWidth = 0;
-int decodedHeight = 0;
-int current_out_y = 0;
 uint16_t bleWriteBufferPos = 0;
 uint32_t bleBytesReceived = 0;
 unsigned long lastDisconnectTime = 0;
@@ -231,7 +234,6 @@ bool buttonWake = false; // true if wakeup via reset button
 volatile bool fwUpdateInProgress = false;
 bool stopAccRecheck = false;
 volatile int pendingOrientation = -1; // written by the orientation ticker, applied by applyPendingOrientation()
-uint8_t *strip_buffer = nullptr;
 int16_t err_curr[MAX_EPD_WIDTH * 3];
 int16_t err_next[MAX_EPD_WIDTH * 3];
 char CLIENT_ID[20];
@@ -441,118 +443,6 @@ int32_t mySeek(JPEGFILE *pFile, int32_t iPosition) {
    return iPosition;
 }
 
-void flushStripBuffer() {
-   if (strip_height == 0 || !strip_buffer)
-      return;
-
-   uint8_t out_row[MAX_EPD_WIDTH / 2];
-   for (int y = 0; y < strip_height; y++) {
-      int abs_y = strip_y_start + y;
-
-      while (current_out_y < EPD_HEIGHT && (current_out_y * decodedHeight / EPD_HEIGHT) == abs_y) {
-         memset(out_row, 0x66, sizeof(out_row));
-
-         for (int out_x = 0; out_x < EPD_WIDTH; out_x++) {
-            int in_x = out_x * decodedWidth / EPD_WIDTH;
-            if (in_x >= decodedWidth)
-               in_x = decodedWidth - 1;
-
-            int idx = (y * decodedWidth + in_x) * 3;
-
-            int orig_r = strip_buffer[idx];
-            int orig_g = strip_buffer[idx + 1];
-            int orig_b = strip_buffer[idx + 2];
-
-            // Clean white & black threshold to prevent noise from JPEG artifacts
-            snapColor(orig_r, orig_g, orig_b);
-
-            int r = orig_r + err_curr[out_x * 3];
-            int g = orig_g + err_curr[out_x * 3 + 1];
-            int b = orig_b + err_curr[out_x * 3 + 2];
-
-            r = (r < 0) ? 0 : (r > 255) ? 255
-                                        : r;
-            g = (g < 0) ? 0 : (g > 255) ? 255
-                                        : g;
-            b = (b < 0) ? 0 : (b > 255) ? 255
-                                        : b;
-
-            uint8_t best = findClosestColor(r, g, b);
-            int pr = (acep_palette[best] >> 16) & 0xFF;
-            int pg = (acep_palette[best] >> 8) & 0xFF;
-            int pb = acep_palette[best] & 0xFF;
-
-            int err_r = r - pr;
-            int err_g = g - pg;
-            int err_b = b - pb;
-
-            if (out_x < EPD_WIDTH - 1) {
-               err_curr[(out_x + 1) * 3] += (err_r * 7) >> 4;
-               err_curr[(out_x + 1) * 3 + 1] += (err_g * 7) >> 4;
-               err_curr[(out_x + 1) * 3 + 2] += (err_b * 7) >> 4;
-            }
-            if (out_x > 0) {
-               err_next[(out_x - 1) * 3] += (err_r * 3) >> 4;
-               err_next[(out_x - 1) * 3 + 1] += (err_g * 3) >> 4;
-               err_next[(out_x - 1) * 3 + 2] += (err_b * 3) >> 4;
-            }
-            err_next[out_x * 3] += (err_r * 5) >> 4;
-            err_next[out_x * 3 + 1] += (err_g * 5) >> 4;
-            err_next[out_x * 3 + 2] += (err_b * 5) >> 4;
-
-            if (out_x < EPD_WIDTH - 1) {
-               err_next[(out_x + 1) * 3] += (err_r * 1) >> 4;
-               err_next[(out_x + 1) * 3 + 1] += (err_g * 1) >> 4;
-               err_next[(out_x + 1) * 3 + 2] += (err_b * 1) >> 4;
-            }
-
-            if (out_x % 2 == 0)
-               out_row[out_x / 2] = (out_row[out_x / 2] & 0x0F) | (best << 4);
-            else
-               out_row[out_x / 2] = (out_row[out_x / 2] & 0xF0) | (best & 0x0F);
-         }
-         rawOutFile.write(out_row, EPD_WIDTH / 2);
-         memcpy(err_curr, err_next, sizeof(err_curr));
-         memset(err_next, 0, sizeof(err_next));
-
-         current_out_y++;
-      }
-   }
-   strip_height = 0;
-}
-
-int JPEGDraw(JPEGDRAW *pDraw) {
-   if (pDraw->y != strip_y_start && strip_height > 0) {
-      flushStripBuffer();
-      strip_y_start = pDraw->y;
-   }
-   int x0 = pDraw->x;
-   int w = pDraw->iWidth;
-   int h = pDraw->iHeight;
-   uint16_t *pPixels = pDraw->pPixels;
-
-   strip_height = h;
-   for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-         int abs_in_x = x0 + x;
-         if (abs_in_x >= decodedWidth)
-            break;
-
-         uint16_t c = pPixels[y * w + x];
-         // Extracting RGB565:
-         int r = (c & 0xF800) >> 8;
-         int g = (c & 0x07E0) >> 3;
-         int b = (c & 0x001F) << 3;
-
-         int idx = (y * decodedWidth + abs_in_x) * 3;
-         strip_buffer[idx] = r;
-         strip_buffer[idx + 1] = g;
-         strip_buffer[idx + 2] = b;
-      }
-   }
-   return 1;
-}
-
 // Open a fixed-size flash file and erase it so it can be rewritten from offset 0
 SerialFlashFile openErasedFile(const char *fileName) {
    SerialFlashFile f = SerialFlash.open(fileName);
@@ -595,178 +485,553 @@ bool copyFlashFile(SerialFlashFile &inFile, uint32_t rawLength, SerialFlashFile 
    return ok;
 }
 
-bool processImageFile(const char *rawFileName, uint32_t rawLength, const char *outFileName) {
-   SerialFlashFile inFile = SerialFlash.open(rawFileName);
-   if (!inFile || rawLength < 2)
-      return false;
-   uint8_t magic[2];
-   inFile.read(magic, 2);
-   Serial.printf("[IMAGE] Read magic: 0x%02X 0x%02X from file '%s'\n", magic[0], magic[1], rawFileName);
-   inFile.seek(0);
+// Image decoding (#20): every source format is turned into RGB565 rows in "view" space (the image as the viewer
+// sees it, scaled and center-cropped to fill the panel). These rows are dithered to the panel colors and written to
+// IMAGE_FILE as raw 4-bit rows (EPD_WIDTH x EPD_HEIGHT, top-down, no header). With EPD_VIEW_ROTATED the panel is
+// viewed in portrait while the buffer is landscape: portrait images are then collected in ROTATE_FILE and rotated
+// by 90 degrees into the buffer.
+struct ImageJob {
+   int viewW, viewH;               // size of the view the source is fitted into
+   bool rotate;                    // view is rotated by 90 degrees relative to the buffer
+   int cropX, cropY, cropW, cropH; // source window that fills the view
+   int nextViewY;                  // next view row to emit
+   uint16_t *sxMap;                // source x for each view x
+   uint8_t *outRow;                // one dithered buffer row (EPD_WIDTH / 2)
+   bool writeError;
+   SerialFlashFile rotFile;
+};
+ImageJob img;
 
-   if (magic[0] == 0xFF && magic[1] == 0xD8) {
-      Serial.println("[IMAGE] JPEG detected. Dithering on-device...");
-      rawOutFile = openErasedFile(outFileName);
-      if (!rawOutFile)
-         return false;
+uint16_t *jpgStrip = nullptr; // JPEG_STRIP_ROWS view rows sampled from the current MCU row
+int jpgStripY = -1;           // source y of the first strip row
+int jpgStripRows = 0;
+uint16_t bmpPalette[256];     // RGB565
 
-      memset(err_curr, 0, sizeof(err_curr));
-      memset(err_next, 0, sizeof(err_next));
-      strip_y_start = 0;
-      strip_height = 0;
+static inline void rgb565To888(uint16_t c, int &r, int &g, int &b) {
+   r = (c >> 8) & 0xF8;
+   r |= r >> 5;
+   g = (c >> 3) & 0xFC;
+   g |= g >> 6;
+   b = (c << 3) & 0xF8;
+   b |= b >> 5;
+}
 
-      jpgInputLength = rawLength;
-      jpeg.open(rawFileName, myOpen, myClose, myRead, mySeek, JPEGDraw);
-      int scale = 0;
-      if (jpeg.getWidth() > 3200) {
-         scale = JPEG_SCALE_EIGHTH;
+static inline uint16_t rgb888To565(int r, int g, int b) {
+   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+// Floyd-Steinberg dither one buffer row (EPD_WIDTH RGB565 pixels) to the panel colors and append it to rawOutFile
+void ditherRow(const uint16_t *row) {
+   uint8_t *out_row = img.outRow;
+   for (int x = 0; x < EPD_WIDTH; x++) {
+      int orig_r, orig_g, orig_b;
+      rgb565To888(row[x], orig_r, orig_g, orig_b);
+
+      // Clean white & black threshold to prevent noise from JPEG artifacts
+      snapColor(orig_r, orig_g, orig_b);
+
+      int r = orig_r + err_curr[x * 3];
+      int g = orig_g + err_curr[x * 3 + 1];
+      int b = orig_b + err_curr[x * 3 + 2];
+
+      r = (r < 0) ? 0 : (r > 255) ? 255
+                                  : r;
+      g = (g < 0) ? 0 : (g > 255) ? 255
+                                  : g;
+      b = (b < 0) ? 0 : (b > 255) ? 255
+                                  : b;
+
+      uint8_t best = findClosestColor(r, g, b);
+      int pr = (acep_palette[best] >> 16) & 0xFF;
+      int pg = (acep_palette[best] >> 8) & 0xFF;
+      int pb = acep_palette[best] & 0xFF;
+
+      int err_r = r - pr;
+      int err_g = g - pg;
+      int err_b = b - pb;
+
+      if (x < EPD_WIDTH - 1) {
+         err_curr[(x + 1) * 3] += (err_r * 7) >> 4;
+         err_curr[(x + 1) * 3 + 1] += (err_g * 7) >> 4;
+         err_curr[(x + 1) * 3 + 2] += (err_b * 7) >> 4;
       }
-      else if (jpeg.getWidth() > 1600) {
-         scale = JPEG_SCALE_QUARTER;
+      if (x > 0) {
+         err_next[(x - 1) * 3] += (err_r * 3) >> 4;
+         err_next[(x - 1) * 3 + 1] += (err_g * 3) >> 4;
+         err_next[(x - 1) * 3 + 2] += (err_b * 3) >> 4;
       }
-      else if (jpeg.getWidth() > 800) {
-         scale = JPEG_SCALE_HALF;
-      }
+      err_next[x * 3] += (err_r * 5) >> 4;
+      err_next[x * 3 + 1] += (err_g * 5) >> 4;
+      err_next[x * 3 + 2] += (err_b * 5) >> 4;
 
-      decodedWidth = jpeg.getWidth() >> scale;
-      decodedHeight = jpeg.getHeight() >> scale;
-
-      strip_buffer = (uint8_t *)malloc(16 * decodedWidth * 3);
-      if (!strip_buffer) {
-         Serial.println("[IMAGE] OOM allocating strip_buffer");
-         jpeg.close();
-         rawOutFile.close();
-         return false;
-      }
-      current_out_y = 0;
-
-      jpeg.decode(0, 0, scale);
-      flushStripBuffer();
-      jpeg.close();
-
-      while (current_out_y < EPD_HEIGHT) {
-         uint8_t whiteLine[MAX_EPD_WIDTH / 2];
-         memset(whiteLine, 0x66, EPD_WIDTH / 2);
-         rawOutFile.write(whiteLine, EPD_WIDTH / 2);
-         current_out_y++;
+      if (x < EPD_WIDTH - 1) {
+         err_next[(x + 1) * 3] += (err_r * 1) >> 4;
+         err_next[(x + 1) * 3 + 1] += (err_g * 1) >> 4;
+         err_next[(x + 1) * 3 + 2] += (err_b * 1) >> 4;
       }
 
-      free(strip_buffer);
-      strip_buffer = nullptr;
-      rawOutFile.close();
-      return true;
+      if (x % 2 == 0)
+         out_row[x / 2] = (out_row[x / 2] & 0x0F) | (best << 4);
+      else
+         out_row[x / 2] = (out_row[x / 2] & 0xF0) | (best & 0x0F);
    }
-   else if (magic[0] == 'B' && magic[1] == 'M') {
-      inFile.seek(0x1C);
-      uint16_t bpp;
-      inFile.read((uint8_t *)&bpp, 2);
-      if (bpp == 4) {
-         Serial.println("[IMAGE] 4-bit BMP detected. Already dithered.");
-         rawOutFile = openErasedFile(outFileName);
-         if (!rawOutFile)
-            return false;
-         bool ok = copyFlashFile(inFile, rawLength, rawOutFile);
-         rawOutFile.close();
-         inFile.close();
-         return ok;
+   if (rawOutFile.write(out_row, EPD_WIDTH / 2) != EPD_WIDTH / 2)
+      img.writeError = true;
+   memcpy(err_curr, err_next, sizeof(err_curr));
+   memset(err_next, 0, sizeof(err_next));
+}
+
+// Pick the view for a source of w x h: rotate portrait images when the panel is viewed in portrait
+void imageJobInit(int w, int h) {
+   img = ImageJob();
+   img.viewW = EPD_WIDTH;
+   img.viewH = EPD_HEIGHT;
+#if EPD_VIEW_ROTATED
+   if (h > w) {
+      if (SerialFlash.exists(ROTATE_FILE)) {
+         img.rotate = true;
+         img.viewW = EPD_HEIGHT;
+         img.viewH = EPD_WIDTH;
       }
       else {
-         Serial.println("[IMAGE] 24-bit BMP detected. Dithering...");
-         rawOutFile = openErasedFile(outFileName);
-         if (!rawOutFile)
-            return false;
-
-         inFile.seek(0x0A);
-         uint32_t offset;
-         inFile.read((uint8_t *)&offset, 4);
-         inFile.seek(offset);
-
-         memset(err_curr, 0, sizeof(err_curr));
-         memset(err_next, 0, sizeof(err_next));
-
-         uint8_t out_row[MAX_EPD_WIDTH / 2];
-         uint8_t in_row[MAX_EPD_WIDTH * 3];
-
-         for (int y = 0; y < EPD_HEIGHT; y++) {
-            memset(out_row, 0x66, sizeof(out_row));
-            int readBytes = inFile.read(in_row, EPD_WIDTH * 3);
-            if (readBytes <= 0)
-               break;
-
-            for (int x = 0; x < EPD_WIDTH; x++) {
-               int orig_b = in_row[x * 3];
-               int orig_g = in_row[x * 3 + 1];
-               int orig_r = in_row[x * 3 + 2];
-
-               snapColor(orig_r, orig_g, orig_b);
-
-               int b = orig_b + err_curr[x * 3 + 2];
-               int g = orig_g + err_curr[x * 3 + 1];
-               int r = orig_r + err_curr[x * 3];
-
-               r = (r < 0) ? 0 : (r > 255) ? 255
-                                           : r;
-               g = (g < 0) ? 0 : (g > 255) ? 255
-                                           : g;
-               b = (b < 0) ? 0 : (b > 255) ? 255
-                                           : b;
-
-               uint8_t best = findClosestColor(r, g, b);
-               int pr = (acep_palette[best] >> 16) & 0xFF;
-               int pg = (acep_palette[best] >> 8) & 0xFF;
-               int pb = acep_palette[best] & 0xFF;
-
-               int err_r = r - pr;
-               int err_g = g - pg;
-               int err_b = b - pb;
-
-               if (x < EPD_WIDTH - 1) {
-                  err_curr[(x + 1) * 3] += (err_r * 7) >> 4;
-                  err_curr[(x + 1) * 3 + 1] += (err_g * 7) >> 4;
-                  err_curr[(x + 1) * 3 + 2] += (err_b * 7) >> 4;
-               }
-               if (x > 0) {
-                  err_next[(x - 1) * 3] += (err_r * 3) >> 4;
-                  err_next[(x - 1) * 3 + 1] += (err_g * 3) >> 4;
-                  err_next[(x - 1) * 3 + 2] += (err_b * 3) >> 4;
-               }
-               err_next[x * 3] += (err_r * 5) >> 4;
-               err_next[x * 3 + 1] += (err_g * 5) >> 4;
-               err_next[x * 3 + 2] += (err_b * 5) >> 4;
-
-               if (x < EPD_WIDTH - 1) {
-                  err_next[(x + 1) * 3] += (err_r * 1) >> 4;
-                  err_next[(x + 1) * 3 + 1] += (err_g * 1) >> 4;
-                  err_next[(x + 1) * 3 + 2] += (err_b * 1) >> 4;
-               }
-
-               if (x % 2 == 0)
-                  out_row[x / 2] = (out_row[x / 2] & 0x0F) | (best << 4);
-               else
-                  out_row[x / 2] = (out_row[x / 2] & 0xF0) | (best & 0x0F);
-            }
-            rawOutFile.write(out_row, EPD_WIDTH / 2);
-            memcpy(err_curr, err_next, sizeof(err_curr));
-            memset(err_next, 0, sizeof(err_next));
-         }
-         rawOutFile.close();
-         inFile.close();
-         return true;
+         Serial.println("[IMAGE] " ROTATE_FILE " missing, not rotating");
       }
    }
-   else if (magic[0] == 0x66 && magic[1] == 0x66) {
-      Serial.println("[IMAGE] Raw dithered payload detected.");
-      rawOutFile = openErasedFile(outFileName);
-      if (!rawOutFile)
+#endif
+}
+
+void imageJobFree() {
+   free(img.sxMap);
+   free(img.outRow);
+   free(jpgStrip);
+   img.sxMap = nullptr;
+   img.outRow = nullptr;
+   jpgStrip = nullptr;
+}
+
+// Center-crop the srcW x srcH source to the view's aspect ratio, allocate buffers and open the output file(s).
+// Nothing is written before this, so a rejected image leaves IMAGE_FILE intact.
+bool imageJobBegin(int srcW, int srcH, const char *outFileName) {
+   if ((int64_t)srcW * img.viewH > (int64_t)srcH * img.viewW) {
+      img.cropH = srcH;
+      img.cropW = (int)((int64_t)srcH * img.viewW / img.viewH);
+   }
+   else {
+      img.cropW = srcW;
+      img.cropH = (int)((int64_t)srcW * img.viewH / img.viewW);
+   }
+   img.cropW = max(img.cropW, 1);
+   img.cropH = max(img.cropH, 1);
+   img.cropX = (srcW - img.cropW) / 2;
+   img.cropY = (srcH - img.cropH) / 2;
+   Serial.printf("[IMAGE] Source %dx%d, crop %dx%d at %d,%d -> %dx%d%s\n", srcW, srcH, img.cropW, img.cropH, img.cropX,
+                 img.cropY, img.viewW, img.viewH, img.rotate ? " (rotated 90)" : "");
+
+   img.sxMap = (uint16_t *)malloc(img.viewW * sizeof(uint16_t));
+   img.outRow = (uint8_t *)malloc(EPD_WIDTH / 2);
+   if (!img.sxMap || !img.outRow) {
+      Serial.println("[IMAGE] OOM allocating image buffers");
+      imageJobFree();
+      return false;
+   }
+   for (int vx = 0; vx < img.viewW; vx++) {
+      img.sxMap[vx] = img.cropX + (int)((int64_t)vx * img.cropW / img.viewW);
+   }
+   memset(err_curr, 0, sizeof(err_curr));
+   memset(err_next, 0, sizeof(err_next));
+
+   rawOutFile = openErasedFile(outFileName);
+   if (!rawOutFile) {
+      imageJobFree();
+      return false;
+   }
+   if (img.rotate) {
+      img.rotFile = openErasedFile(ROTATE_FILE);
+      if (!img.rotFile) {
+         rawOutFile.close();
+         imageJobFree();
          return false;
-      bool ok = copyFlashFile(inFile, rawLength, rawOutFile);
-      rawOutFile.close();
-      inFile.close();
-      return ok;
+      }
+   }
+   return true;
+}
+
+// Source row that view row vy samples
+int imageViewToSrcY(int vy) {
+   return img.cropY + (int)((int64_t)vy * img.cropH / img.viewH);
+}
+
+// Append the next view row (img.viewW RGB565 pixels)
+void imageEmitViewRow(const uint16_t *row) {
+   if (img.nextViewY >= img.viewH)
+      return;
+   if (img.rotate) {
+      if (img.rotFile.write(row, img.viewW * 2) != (uint32_t)img.viewW * 2)
+         img.writeError = true;
+   }
+   else {
+      ditherRow(row);
+   }
+   img.nextViewY++;
+}
+
+// Rotate the view stored in ROTATE_FILE (EPD_HEIGHT x EPD_WIDTH) into buffer rows and dither them.
+// The panel is viewed in rotationText = rotationPicture + 1, i.e. GFX rotates the view by 90 degrees clockwise:
+// buffer pixel (bx, by) = view pixel (by, EPD_WIDTH - 1 - bx).
+bool imageWriteRotatedRows() {
+   const int chunkCols = 16; // view columns (= buffer rows) per pass
+   uint16_t *chunk = (uint16_t *)malloc(chunkCols * img.viewH * sizeof(uint16_t));
+   uint16_t *bufRow = (uint16_t *)malloc(EPD_WIDTH * sizeof(uint16_t));
+   if (!chunk || !bufRow) {
+      Serial.println("[IMAGE] OOM allocating rotation buffers");
+      free(chunk);
+      free(bufRow);
+      return false;
+   }
+   for (int c = 0; c < img.viewW; c += chunkCols) {
+      int n = min(chunkCols, img.viewW - c);
+      for (int vy = 0; vy < img.viewH; vy++) {
+         img.rotFile.seek(((uint32_t)vy * img.viewW + c) * 2);
+         img.rotFile.read(chunk + vy * chunkCols, n * 2);
+      }
+      for (int j = 0; j < n; j++) {
+         for (int bx = 0; bx < EPD_WIDTH; bx++) {
+            bufRow[bx] = chunk[(EPD_WIDTH - 1 - bx) * chunkCols + j];
+         }
+         ditherRow(bufRow);
+      }
+   }
+   free(chunk);
+   free(bufRow);
+   return true;
+}
+
+// Pad missing view rows with white, rotate if needed, close files. Returns IMG_OK or IMG_FAILED.
+int imageJobEnd() {
+   bool ok = true;
+   if (img.nextViewY < img.viewH) {
+      Serial.printf("[IMAGE] Only %d of %d rows decoded, padding with white\n", img.nextViewY, img.viewH);
+      uint16_t *white = (uint16_t *)malloc(img.viewW * sizeof(uint16_t));
+      if (white) {
+         for (int i = 0; i < img.viewW; i++)
+            white[i] = 0xFFFF;
+         while (img.nextViewY < img.viewH)
+            imageEmitViewRow(white);
+         free(white);
+      }
+      else {
+         ok = false;
+      }
+   }
+   if (ok && img.rotate)
+      ok = imageWriteRotatedRows();
+   if (img.rotate)
+      img.rotFile.close();
+   rawOutFile.close();
+   imageJobFree();
+   if (img.writeError) {
+      Serial.println("[IMAGE] Flash write failed");
+      ok = false;
+   }
+   return ok ? IMG_OK : IMG_FAILED;
+}
+
+// Emit every view row that samples one of the buffered strip rows
+void flushJpegStrip() {
+   for (int r = 0; r < jpgStripRows; r++) {
+      while (img.nextViewY < img.viewH && imageViewToSrcY(img.nextViewY) == jpgStripY + r) {
+         imageEmitViewRow(jpgStrip + r * img.viewW);
+      }
+   }
+   jpgStripRows = 0;
+}
+
+int JPEGDraw(JPEGDRAW *pDraw) {
+   if (pDraw->y != jpgStripY) {
+      flushJpegStrip();
+      jpgStripY = pDraw->y;
+   }
+   int h = min(pDraw->iHeight, JPEG_STRIP_ROWS);
+   jpgStripRows = max(jpgStripRows, h);
+   int x0 = pDraw->x;
+   int x1 = x0 + pDraw->iWidth;
+   for (int vx = 0; vx < img.viewW; vx++) {
+      int sx = img.sxMap[vx];
+      if (sx < x0)
+         continue;
+      if (sx >= x1)
+         break;
+      for (int y = 0; y < h; y++) {
+         jpgStrip[y * img.viewW + vx] = pDraw->pPixels[y * pDraw->iWidth + (sx - x0)];
+      }
+   }
+   return img.writeError ? 0 : 1; // 0 aborts the decode
+}
+
+int processJpeg(const char *rawFileName, uint32_t rawLength, const char *outFileName) {
+   jpgInputLength = rawLength;
+   if (!jpeg.open(rawFileName, myOpen, myClose, myRead, mySeek, JPEGDraw)) {
+      Serial.printf("[IMAGE] Invalid JPEG (error %d)\n", jpeg.getLastError());
+      return IMG_REJECTED;
+   }
+   int w = jpeg.getWidth();
+   int h = jpeg.getHeight();
+   if (w <= 0 || h <= 0) {
+      Serial.println("[IMAGE] Invalid JPEG size");
+      jpeg.close();
+      return IMG_REJECTED;
+   }
+   imageJobInit(w, h);
+
+   // Largest JPEGDEC downscale (flags, not shifts) that still fills the view
+   int div = 1;
+   int scale = 0;
+   if (jpeg.getJPEGType() == JPEG_MODE_PROGRESSIVE) {
+      // JPEGDEC only decodes the first scan of a progressive JPEG, at 1/8 size
+      div = 8;
+      scale = JPEG_SCALE_EIGHTH;
+      Serial.printf("[IMAGE] Progressive JPEG: only %dx%d available, use baseline JPEGs for full quality\n", w / 8, h / 8);
+   }
+   else {
+      const int divs[] = {8, 4, 2};
+      const int scales[] = {JPEG_SCALE_EIGHTH, JPEG_SCALE_QUARTER, JPEG_SCALE_HALF};
+      for (int i = 0; i < 3; i++) {
+         if (w / divs[i] >= img.viewW && h / divs[i] >= img.viewH) {
+            div = divs[i];
+            scale = scales[i];
+            break;
+         }
+      }
+   }
+   Serial.printf("[IMAGE] JPEG %dx%d, decoding at 1/%d\n", w, h, div);
+   int srcW = max(w / div, 1);
+   int srcH = max(h / div, 1);
+
+   jpgStrip = (uint16_t *)malloc(JPEG_STRIP_ROWS * img.viewW * sizeof(uint16_t));
+   if (!jpgStrip) {
+      Serial.println("[IMAGE] OOM allocating JPEG strip");
+      jpeg.close();
+      return IMG_REJECTED;
+   }
+   uint16_t *strip = jpgStrip;
+   jpgStrip = nullptr; // imageJobBegin frees jpgStrip on failure
+   if (!imageJobBegin(srcW, srcH, outFileName)) {
+      free(strip);
+      jpeg.close();
+      return IMG_FAILED;
+   }
+   jpgStrip = strip;
+   jpgStripY = -1;
+   jpgStripRows = 0;
+
+   int decoded = jpeg.decode(0, 0, scale);
+   flushJpegStrip();
+   int lastError = jpeg.getLastError();
+   jpeg.close();
+   int result = imageJobEnd();
+   if (!decoded) {
+      Serial.printf("[IMAGE] JPEG decode failed (error %d)\n", lastError);
+      return IMG_FAILED;
+   }
+   return result;
+}
+
+static inline uint32_t le32(const uint8_t *p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24); }
+static inline uint16_t le16(const uint8_t *p) { return p[0] | (p[1] << 8); }
+
+int processBmp(SerialFlashFile &inFile, uint32_t rawLength, const char *outFileName) {
+   uint8_t hdr[54];
+   inFile.seek(0);
+   if (rawLength < sizeof(hdr) || inFile.read(hdr, sizeof(hdr)) != sizeof(hdr)) {
+      Serial.println("[IMAGE] BMP header truncated");
+      return IMG_REJECTED;
+   }
+   uint32_t dataOffset = le32(hdr + 0x0A);
+   uint32_t dibSize = le32(hdr + 0x0E);
+   int32_t w = (int32_t)le32(hdr + 0x12);
+   int32_t hRaw = (int32_t)le32(hdr + 0x16);
+   uint16_t bpp = le16(hdr + 0x1C);
+   uint32_t compression = le32(hdr + 0x1E);
+   uint32_t colorsUsed = le32(hdr + 0x2E);
+   bool bottomUp = hRaw > 0; // standard BMPs store the last row first
+   int32_t h = bottomUp ? hRaw : -hRaw;
+
+   Serial.printf("[IMAGE] BMP %dx%d, %u bpp, %s\n", (int)w, (int)h, bpp, bottomUp ? "bottom-up" : "top-down");
+   if (dibSize < 40 || w <= 0 || h <= 0 || w > 10000 || h > 10000) {
+      Serial.println("[IMAGE] Invalid BMP header");
+      return IMG_REJECTED;
+   }
+   if (bpp != 4 && bpp != 8 && bpp != 24 && bpp != 32) {
+      Serial.printf("[IMAGE] Unsupported BMP bit depth %u\n", bpp);
+      return IMG_REJECTED;
+   }
+   if (compression != 0 && !(compression == 3 && bpp == 32)) { // BI_RGB, or BI_BITFIELDS assumed BGRX
+      Serial.printf("[IMAGE] Unsupported BMP compression %u\n", compression);
+      return IMG_REJECTED;
+   }
+   uint32_t stride = ((uint32_t)w * bpp + 31) / 32 * 4;
+   if (dataOffset + stride * (uint32_t)h > rawLength) {
+      Serial.printf("[IMAGE] BMP truncated: needs %u bytes, got %u\n", dataOffset + stride * (uint32_t)h, rawLength);
+      return IMG_REJECTED;
    }
 
+   // Palette (B, G, R, 0 entries after the DIB header)
+   int paletteSize = 0;
+   if (bpp <= 8) {
+      paletteSize = (colorsUsed > 0 && colorsUsed < (1u << bpp)) ? colorsUsed : (1 << bpp);
+      for (int i = 0; i < 256; i++)
+         bmpPalette[i] = 0xFFFF;
+      inFile.seek(14 + dibSize);
+      for (int i = 0; i < paletteSize; i++) {
+         uint8_t e[4];
+         if (inFile.read(e, 4) != 4)
+            break;
+         bmpPalette[i] = rgb888To565(e[2], e[1], e[0]);
+      }
+   }
+
+   // Pre-dithered 4-bit image at panel size: copy rows (top-down), mapping the palette to panel color indices
+   if (bpp == 4 && w == EPD_WIDTH && h == EPD_HEIGHT) {
+      uint8_t remap[16];
+      uint8_t seen = 0; // bit per panel color index
+      for (int i = 0; i < 16; i++) {
+         int r, g, b;
+         rgb565To888(bmpPalette[i], r, g, b);
+         remap[i] = findClosestColor(r, g, b);
+         if (i < paletteSize)
+            seen |= 1 << remap[i];
+      }
+      const uint8_t allColors = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 6);
+      bool identity = true;
+      if ((seen & allColors) == allColors) {
+         for (int i = 0; i < paletteSize; i++)
+            identity = identity && (remap[i] == i || i == 4);
+         Serial.printf("[IMAGE] 4-bit BMP, palette %s\n", identity ? "in panel order" : "remapped to panel colors");
+      }
+      else {
+         // Not a 6-color palette: assume the indices already are panel colors (what older firmware did)
+         Serial.println("[IMAGE] 4-bit BMP, palette ignored (not a 6-color palette), using indices as panel colors");
+      }
+
+      rawOutFile = openErasedFile(outFileName);
+      if (!rawOutFile)
+         return IMG_FAILED;
+      uint8_t *row = (uint8_t *)malloc(EPD_WIDTH / 2);
+      if (!row) {
+         rawOutFile.close();
+         return IMG_FAILED;
+      }
+      bool ok = true;
+      for (int by = 0; by < EPD_HEIGHT && ok; by++) {
+         uint32_t fileRow = bottomUp ? (EPD_HEIGHT - 1 - by) : by;
+         inFile.seek(dataOffset + fileRow * stride);
+         ok = inFile.read(row, EPD_WIDTH / 2) == EPD_WIDTH / 2;
+         if (!identity) {
+            for (int i = 0; i < EPD_WIDTH / 2; i++)
+               row[i] = (remap[row[i] >> 4] << 4) | remap[row[i] & 0x0F];
+         }
+         ok = ok && rawOutFile.write(row, EPD_WIDTH / 2) == EPD_WIDTH / 2;
+      }
+      free(row);
+      rawOutFile.close();
+      return ok ? IMG_OK : IMG_FAILED;
+   }
+
+   imageJobInit(w, h);
+   const uint32_t readBufSize = 1024;
+   uint8_t *readBuf = (uint8_t *)malloc(readBufSize);
+   uint16_t *viewRow = (uint16_t *)malloc(img.viewW * sizeof(uint16_t));
+   if (!readBuf || !viewRow) {
+      Serial.println("[IMAGE] OOM allocating BMP buffers");
+      free(readBuf);
+      free(viewRow);
+      return IMG_REJECTED;
+   }
+   if (!imageJobBegin(w, h, outFileName)) {
+      free(readBuf);
+      free(viewRow);
+      return IMG_FAILED;
+   }
+
+   uint32_t pixelBytes = (bpp >= 8) ? bpp / 8 : 1;
+   int prevSy = -1;
+   while (img.nextViewY < img.viewH && !img.writeError) {
+      int sy = imageViewToSrcY(img.nextViewY);
+      if (sy != prevSy) {
+         uint32_t rowStart = dataOffset + (uint32_t)(bottomUp ? (h - 1 - sy) : sy) * stride;
+         uint32_t bufStart = 0;
+         uint32_t bufLen = 0;
+         for (int vx = 0; vx < img.viewW; vx++) {
+            int sx = img.sxMap[vx];
+            uint32_t off = (uint32_t)sx * bpp / 8;
+            if (bufLen == 0 || off < bufStart || off + pixelBytes > bufStart + bufLen) {
+               uint32_t n = min(readBufSize, stride - off);
+               inFile.seek(rowStart + off);
+               bufLen = inFile.read(readBuf, n);
+               bufStart = off;
+               if (bufLen < pixelBytes) {
+                  bufLen = 0;
+                  viewRow[vx] = 0xFFFF;
+                  continue;
+               }
+            }
+            const uint8_t *p = readBuf + (off - bufStart);
+            switch (bpp) {
+            case 4:
+               viewRow[vx] = bmpPalette[(sx & 1) ? (p[0] & 0x0F) : (p[0] >> 4)];
+               break;
+            case 8:
+               viewRow[vx] = bmpPalette[p[0]];
+               break;
+            default: // 24 / 32: B, G, R(, X)
+               viewRow[vx] = rgb888To565(p[2], p[1], p[0]);
+               break;
+            }
+         }
+         prevSy = sy;
+      }
+      imageEmitViewRow(viewRow);
+   }
+   free(readBuf);
+   free(viewRow);
+   return imageJobEnd();
+}
+
+// Convert the downloaded file (JPEG, BMP or raw panel data) into IMAGE_FILE.
+// Returns IMG_OK, IMG_REJECTED (unsupported/invalid, IMAGE_FILE untouched) or IMG_FAILED (IMAGE_FILE is broken).
+int processImageFile(const char *rawFileName, uint32_t rawLength, const char *outFileName) {
+   SerialFlashFile inFile = SerialFlash.open(rawFileName);
+   if (!inFile || rawLength < 2)
+      return IMG_REJECTED;
+   uint8_t magic[2];
+   inFile.read(magic, 2);
+   Serial.printf("[IMAGE] Read magic: 0x%02X 0x%02X from file '%s' (%u bytes)\n", magic[0], magic[1], rawFileName, rawLength);
+   inFile.seek(0);
+
+   int result = IMG_REJECTED;
+   if (magic[0] == 0xFF && magic[1] == 0xD8) {
+      inFile.close();
+      return processJpeg(rawFileName, rawLength, outFileName);
+   }
+   else if (magic[0] == 'B' && magic[1] == 'M') {
+      result = processBmp(inFile, rawLength, outFileName);
+   }
+   else if (rawLength == EPD_WIDTH * EPD_HEIGHT / 2) {
+      Serial.println("[IMAGE] Raw panel payload detected.");
+      rawOutFile = openErasedFile(outFileName);
+      if (!rawOutFile) {
+         result = IMG_FAILED;
+      }
+      else {
+         result = copyFlashFile(inFile, rawLength, rawOutFile) ? IMG_OK : IMG_FAILED;
+         rawOutFile.close();
+      }
+   }
+   else {
+      Serial.printf("[IMAGE] Unknown format (expected JPEG, BMP or %u bytes of raw panel data)\n", EPD_WIDTH * EPD_HEIGHT / 2);
+   }
    inFile.close();
-   return false;
+   return result;
 }
 
 // Power supply display
@@ -1754,6 +2019,12 @@ void initFlashFiles() {
       if (ok) {
          SerialFlashFile dl = SerialFlash.open(DOWNLOAD_FILE);
          Serial.printf("[FLASH] %s: %u bytes, %s: %u bytes\n", IMAGE_FILE, SerialFlash.open(IMAGE_FILE).size(), DOWNLOAD_FILE, dl.size());
+#if EPD_VIEW_ROTATED
+         // Optional: without it portrait images are not rotated
+         if (!SerialFlash.exists(ROTATE_FILE) && !SerialFlash.createErasable(ROTATE_FILE, ROTATE_FILE_SIZE)) {
+            Serial.println("[FLASH] Could not create " ROTATE_FILE);
+         }
+#endif
          return;
       }
       if (attempt == 0) {
@@ -2625,13 +2896,16 @@ int processHttpDownload(String fileName) {
    if (connectWifi()) {
       dlSuccess = loadImageFromWeb(settings.downloadUrl, DOWNLOAD_FILE);
       if (dlSuccess == DL_OK) {
-         if (processImageFile(DOWNLOAD_FILE, downloadedLength, fileName.c_str())) {
+         int imgResult = processImageFile(DOWNLOAD_FILE, downloadedLength, fileName.c_str());
+         if (imgResult == IMG_OK) {
             dlSuccess = 0;
             setImageValid(true);
          }
          else {
-            Serial.println("[IMAGE] Failed to process image file");
-            setImageValid(false);
+            // A rejected image never touched IMAGE_FILE, so the last image stays valid
+            Serial.printf("[IMAGE] Failed to process image file (%s)\n", imgResult == IMG_REJECTED ? "rejected, last image kept" : "image file broken");
+            if (imgResult == IMG_FAILED)
+               setImageValid(false);
             dlSuccess = -1;
          }
       }

@@ -36,11 +36,13 @@
 #define EPD_WIDTH 1600
 #define EPD_HEIGHT 1200
 #define SCREEN_OFFSET 200
+#define EPD_VIEW_ROTATED 0 // viewed like the buffer (rotationText == rotationPicture)
 using DisplayType = GxEPD2_7C<GxEPD2_1330c_EL133UF3, GxEPD2_1330c_EL133UF3::HEIGHT / 8>;
 #else
 #define EPD_WIDTH 800
 #define EPD_HEIGHT 480
 #define SCREEN_OFFSET 100
+#define EPD_VIEW_ROTATED 1 // viewed in portrait: rotationText == rotationPicture + 1 (see displaySetRotation)
 using DisplayType = GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HEIGHT / 4>;
 #endif
 
