@@ -9,7 +9,6 @@
 #include <Preferences.h>
 // #include <SD_MMC.h>
 #include "Adafruit_GFX.h"
-#include "EEPROM.h"
 #include "SPIFFS.h"
 #include "SdFat.h"
 #include "Ticker.h"
@@ -89,9 +88,7 @@
 #endif
 
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
-#define LENGTH(x) (strlen(x) + 1) // length of char string
-#define EEPROM_SIZE 2048          // EEPROM size
-#define EEPROM_SETTINGS_ADR 500   // start address to store settings
+#define SETTINGS_NAMESPACE "settings" // NVS namespace for all persistent settings
 #define BLE_BUFFER_SIZE 19200
 
 #define DEFAULT_SLEEP 3600 // Default time how long to sleep after update
@@ -155,6 +152,7 @@ esp_sleep_wakeup_cause_t wakeup_reason;
 KXTJ3 myIMU(ACC_ADDR); // Address can be 0x0E or 0x0F
 WiFiClientSecure net = WiFiClientSecure();
 Preferences preferences;
+Preferences settingsStore; // opened once in setup(), stays open until deep sleep
 Ticker tickerFailsave;
 Ticker perdiodicLed;
 Ticker perdiodicLedOff;
@@ -209,7 +207,6 @@ uint8_t *bleWriteBuffer = nullptr;
 void ledBlink(int timeout, bool on, int dimValue = 100);
 void debugFS(void);
 bool BleInit(String deviceId, bool enable);
-void writeIntToFlash(int value, int startAddr);
 int storeSleepTimeMem(int updateTime = 0);
 void gotToDeepSleep(int seconds, bool showScreen = true, bool motionWake = true);
 int accInit(bool skipInit = false);
@@ -787,100 +784,57 @@ int readVDD(bool singleReading) {
    return vdd;
 }
 
-bool EepromInit(int size) {
-   if (!EEPROM.begin(size)) { // Init EEPROM
-      Serial.println("[MEM] failed to init EEPROM");
+bool settingsStoreInit() {
+   if (!settingsStore.begin(SETTINGS_NAMESPACE, false)) {
+      Serial.println("[MEM] failed to init settings store");
       delay(1000);
       return false;
    }
-   else {
-      Serial.println("[MEM] EEPROM init OK");
-      return true;
-   }
-}
-
-bool EepromClear() {
-   char resetValue = 0;
-   for (int i = 0; i < EEPROM_SIZE; i++) {
-      EEPROM.write(i, resetValue);
-   }
-   Serial.println("[MEM] EEPROM clear OK");
+   Serial.println("[MEM] settings store init OK");
    return true;
 }
 
-void writeStringToFlash(const char *toStore, int startAddr) {
-   int i = 0;
-   for (; i < LENGTH(toStore); i++) {
-      EEPROM.write(startAddr + i, toStore[i]);
-   }
-   EEPROM.write(startAddr + i, '\0');
-   EEPROM.commit();
+bool settingsStoreClear() {
+   settingsStore.clear();
+   Serial.println("[MEM] settings store clear OK");
+   return true;
 }
 
-String readStringFromFlash(int startAddr) {
-   char in[129];
-   int i = 0;
-   for (; i < 128; i++) {
-      char c = EEPROM.read(startAddr + i);
-      if (c == '\0' || c == (char)0xFF) {
-         break;
-      }
-      in[i] = c;
-   }
-   in[i] = '\0';
-
-   return String(in);
+void saveSettings() {
+   settingsStore.putBool("battWarn", settings.showBatteryWarning);
+   settingsStore.putBool("wifiWarn", settings.showWifiWarning);
+   settingsStore.putBool("sleepDisabled", settings.sleepDisabled);
+   settingsStore.putInt("imageMode", settings.imageMode);
+   settingsStore.putString("downloadUrl", settings.downloadUrl);
+   settingsStore.putString("lastModified", settings.lastModified);
+   settingsStore.putString("httpAuthUser", settings.httpAuthUser);
+   settingsStore.putString("httpAuthPass", settings.httpAuthPassword);
+   settingsStore.putBool("motionWakeup", settings.motionWakeup);
+   settingsStore.putBool("chargerMode", settings.chargerMode);
+   settingsStore.putString("settingsUrl", settings.settingsUrl);
+   settingsStore.putString("settingsLastMod", settings.settingsLastModified);
+   settingsStore.putBool("autoRotation", settings.autoRotation);
+   Serial.println("[MEM] Settings saved");
 }
 
-int readIntFromFlash(int addr) {
-   DataLayout data3;
-   EEPROM.get(addr, data3);
-   return data3.integer;
-}
-
-void writeIntToFlash(int value, int startAddr) {
-   DataLayout data2;
-   data2.integer = value;
-   EEPROM.put(startAddr, data2);
-   EEPROM.commit();
-}
-
-void saveSettingsToFlash(int startAddr) {
-   writeIntToFlash(settings.showBatteryWarning, startAddr + 5);
-   writeIntToFlash(settings.showWifiWarning, startAddr + 10);
-   writeIntToFlash(settings.sleepDisabled, startAddr + 15);
-   writeIntToFlash(settings.imageMode, startAddr + 20);
-   writeStringToFlash(settings.downloadUrl.c_str(), startAddr + 25);
-   writeStringToFlash(settings.lastModified.c_str(), startAddr + 155);
-   writeStringToFlash(settings.httpAuthUser.c_str(), startAddr + 285);
-   writeStringToFlash(settings.httpAuthPassword.c_str(), startAddr + 415);
-   writeIntToFlash(settings.motionWakeup, startAddr + 545);
-   writeIntToFlash(settings.chargerMode, startAddr + 550);
-   writeStringToFlash(settings.settingsUrl.c_str(), startAddr + 555);
-   writeStringToFlash(settings.settingsLastModified.c_str(), startAddr + 685);
-   writeIntToFlash(settings.autoRotation, startAddr + 815);
-   Serial.println("[MEM] Settings saved to EEPROM");
-}
-
-void restoreSettingsToFlash(int startAddr) {
-   wifiSettings.ssid = readStringFromFlash(0);
-   wifiSettings.pss = readStringFromFlash(40);
+void restoreSettings() {
+   wifiSettings.ssid = settingsStore.getString("ssid", "");
+   wifiSettings.pss = settingsStore.getString("pss", "");
    settings.timeout = storeSleepTimeMem(0);
-   settings.showBatteryWarning = readIntFromFlash(startAddr + 5);
-   settings.showWifiWarning = readIntFromFlash(startAddr + 10);
-   settings.sleepDisabled = readIntFromFlash(startAddr + 15);
-   settings.imageMode = readIntFromFlash(startAddr + 20);
-   settings.downloadUrl = readStringFromFlash(startAddr + 25);
-   settings.lastModified = readStringFromFlash(startAddr + 155);
-   settings.httpAuthUser = readStringFromFlash(startAddr + 285);
-   settings.httpAuthPassword = readStringFromFlash(startAddr + 415);
-   settings.motionWakeup = readIntFromFlash(startAddr + 545);
-   settings.chargerMode = readIntFromFlash(startAddr + 550);
-   settings.settingsUrl = readStringFromFlash(startAddr + 555);
-   settings.settingsLastModified = readStringFromFlash(startAddr + 685);
-   int autoRot = readIntFromFlash(startAddr + 815);
-   settings.autoRotation = (autoRot == 0) ? false : true;
-   Serial.println("[MEM] Settings restored from EEPROM");
+   settings.showBatteryWarning = settingsStore.getBool("battWarn", true);
+   settings.showWifiWarning = settingsStore.getBool("wifiWarn", true);
+   settings.sleepDisabled = settingsStore.getBool("sleepDisabled", false);
+   settings.imageMode = settingsStore.getInt("imageMode", 1);
+   settings.downloadUrl = settingsStore.getString("downloadUrl", "");
+   settings.lastModified = settingsStore.getString("lastModified", "");
+   settings.httpAuthUser = settingsStore.getString("httpAuthUser", "");
+   settings.httpAuthPassword = settingsStore.getString("httpAuthPass", "");
+   settings.motionWakeup = settingsStore.getBool("motionWakeup", false);
+   settings.chargerMode = settingsStore.getBool("chargerMode", false);
+   settings.settingsUrl = settingsStore.getString("settingsUrl", "");
+   settings.settingsLastModified = settingsStore.getString("settingsLastMod", "");
+   settings.autoRotation = settingsStore.getBool("autoRotation", true);
+   Serial.println("[MEM] Settings restored");
    if (DEBUG_FLAG) {
       Serial.printf("[MEM] Settings - BatteryWarning: %d WifiWarning: %d SleepDisabled: %d ImageMode: %d MotionWakeup: %d ChargerMode: %d\n", settings.showBatteryWarning, settings.showWifiWarning, settings.sleepDisabled, settings.imageMode, settings.motionWakeup, settings.chargerMode);
    }
@@ -1012,14 +966,14 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
          String val = pCharacteristic->getValue().c_str();
          settings.chargerMode = (val == "1" || val == "true");
          Serial.printf("[BLE] Charger Mode updated to: %d\n", settings.chargerMode);
-         saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+         saveSettings();
          chargeMode(settings.chargerMode);
       }
       else if (pCharacteristic->getUUID().toString() == "1000000c-0000-0000-0000-000000000001") {
          String val = pCharacteristic->getValue().c_str();
          settings.autoRotation = (val == "1" || val == "true");
          Serial.printf("[BLE] Auto Rotation updated to: %d\n", settings.autoRotation);
-         saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+         saveSettings();
       }
       else if (pCharacteristic->getUUID().toString() == "1000000b-0000-0000-0000-000000000001") {
          settings.settingsUrl = pCharacteristic->getValue().c_str();
@@ -1068,7 +1022,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
             bleWriteBufferPos = 0;
             // Modus automatisch auf Lokales Bild (BLE) wechseln
             settings.imageMode = 0;
-            saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+            saveSettings();
             Serial.println("[BLE] Upload STARTED. Switched to ImageMode 0.");
          }
          else if (cmd == "FLUSH") {
@@ -1110,7 +1064,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
          }
          else if (cmd == "SAVE_SETTINGS") {
             Serial.println("[BLE] SAVE_SETTINGS received.");
-            saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+            saveSettings();
          }
          else if (cmd == "RESET") {
             Serial.println("[BLE] Settings RESET received.");
@@ -1547,15 +1501,13 @@ String urldecode(String str) {
 }
 
 int storeSleepTimeMem(int updateTime) {
-   int returnSleepTime = readIntFromFlash(210);
-   if (returnSleepTime == -1)
-      returnSleepTime = DEFAULT_SLEEP;
+   int returnSleepTime = settingsStore.getInt("timeout", DEFAULT_SLEEP);
    if (updateTime > 0) {
       if (returnSleepTime != updateTime) {
          systemData.newSleepTimeSet = true;
          if (DEBUG_FLAG)
             Serial.printf("[MEM] Update Sleep Time to %d\n", updateTime);
-         writeIntToFlash(updateTime, 210);
+         settingsStore.putInt("timeout", updateTime);
       }
       returnSleepTime = updateTime;
    }
@@ -1991,12 +1943,11 @@ void recheckAccOrient(int setOrientValue) {
    if (stopAccRecheck)
       return;
    int accCheck = accInit(true);
-   if (accCheck != readIntFromFlash(220)) {
+   if (accCheck != settingsStore.getInt("orientation", 0)) {
       isOrientUpdate = true;
       systemData.deviceOrientation = accCheck;
       Serial.printf("[ACC] Update Orient to Mem: %d \n", systemData.deviceOrientation);
-      writeIntToFlash(systemData.deviceOrientation, 220);
-      // writeIntToFlash(0, 150);  // Reset picture version after ota to init update
+      settingsStore.putInt("orientation", systemData.deviceOrientation);
       if (systemData.deviceOrientation == 2 || systemData.deviceOrientation == 3) {
          displaySetRotation(1);
       }
@@ -2069,7 +2020,7 @@ bool chargeMode(bool enable) {
 bool resetAll(bool resetWifi) {
    checkOrientationInBackground(0, false);
    Serial.printf("[MAIN] Reset - WIFI %d \n", resetWifi);
-   writeIntToFlash(0, 220);          // restore screen orient to default
+   settingsStore.putInt("orientation", 0); // restore screen orient to default
    storeSleepTimeMem(DEFAULT_SLEEP); // restore sleep mem store to default
    if (SerialFlash.exists("tmp.bmp")) {
       SerialFlashFile f = SerialFlash.open("tmp.bmp");
@@ -2082,14 +2033,12 @@ bool resetAll(bool resetWifi) {
    settings.httpAuthUser = "";
    settings.httpAuthPassword = "";
    if (resetWifi) {
-      writeStringToFlash("", 0);  // storing ssid at address 0
-      writeStringToFlash("", 40); // storing pss at address 40
       wifiSettings.ssid = "";
       wifiSettings.pss = "";
       wifiSettings.wifiRetries = 0;
-      EepromClear();
+      settingsStoreClear();
    }
-   saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+   saveSettings();
    return true;
 }
 
@@ -2249,8 +2198,8 @@ void runSetupMode() {
          if (WiFi.status() == WL_CONNECTED) {
             Serial.println("[WIFI] Connected successfully!");
             // check valid wifi connection
-            writeStringToFlash(wifiSettings.ssid.c_str(), 0);
-            writeStringToFlash(wifiSettings.pss.c_str(), 40);
+            settingsStore.putString("ssid", wifiSettings.ssid);
+            settingsStore.putString("pss", wifiSettings.pss);
          }
          else {
             Serial.println("[WIFI] Connection timeout!");
@@ -2345,9 +2294,9 @@ int processHttpDownload(String fileName) {
 
 void initFirstBoot(void) {
    // First Boot Check
-   if (EEPROM.read(499) != 42) {
+   if (!settingsStore.getBool("initialized", false)) {
       Serial.println("[MEM] First boot detected, applying default settings.");
-      EepromClear();
+      settingsStoreClear();
       settings.timeout = 3600;
       settings.showBatteryWarning = true;
       settings.showWifiWarning = true;
@@ -2363,9 +2312,8 @@ void initFirstBoot(void) {
       settings.lastModified = "";
 
       storeSleepTimeMem(3600);
-      saveSettingsToFlash(EEPROM_SETTINGS_ADR);
-      EEPROM.write(499, 42);
-      EEPROM.commit();
+      saveSettings();
+      settingsStore.putBool("initialized", true);
    }
 }
 
@@ -2430,7 +2378,7 @@ void fetchRemoteSettings() {
 
          if (changed) {
             Serial.println("[HTTP] JSON settings applied and saved.");
-            saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+            saveSettings();
          }
       }
       else {
@@ -2525,7 +2473,7 @@ void setup() {
       startupCounter(false);
    }
 
-   EepromInit(EEPROM_SIZE);
+   settingsStoreInit();
    // pinMode(DISP_POWER, INPUT); // USB TEST PINS TODO: only paper 7
    pinMode(INT_PIN, INPUT);
    pinMode(BUSY_PIN, INPUT);
@@ -2543,8 +2491,8 @@ void setup() {
    gpio_set_drive_capability((gpio_num_t)MOSI_PIN, GPIO_DRIVE_CAP_1);
    initFirstBoot();
 
-   // Load credentials & settings from EEPROM
-   restoreSettingsToFlash(EEPROM_SETTINGS_ADR);
+   // Load credentials & settings from NVS
+   restoreSettings();
    displaySetOverlayOption(DEVICE_INFO_STRING, true);
    displaySetRotation(0);
    // myEsp32FOTA removed
@@ -2608,7 +2556,7 @@ void setup() {
    }
 
    ledBlink(500, true);
-   saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+   saveSettings();
    storeSleepTimeMem(settings.timeout);
 
    systemData.sleepPrediction = calculateSleepDuration(settings.timeout, systemData.newSleepTimeSet, false);
@@ -2639,7 +2587,7 @@ void loop() {
       if (settings.imageMode == 0 && !SerialFlash.exists(fileName.c_str()) && settings.downloadUrl.length() > 0) {
          Serial.println("[IMAGE] BLE mode active but tmp.bmp is missing. Fallback to URL mode.");
          settings.imageMode = 1;
-         saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+         saveSettings();
       }
 
       // Ensure WiFi if we need it for Settings OR Image
@@ -2654,7 +2602,18 @@ void loop() {
          }
 
          if (WiFi.status() == WL_CONNECTED) {
+            int prevTimeout = settings.timeout;
+            bool prevChargerMode = settings.chargerMode;
             fetchRemoteSettings(); // This might change imageMode or downloadUrl!
+
+            // Sleep time and charger mode were already applied in setup(), redo it so remote changes take effect this cycle
+            if (settings.timeout != prevTimeout) {
+               storeSleepTimeMem(settings.timeout);
+               systemData.sleepPrediction = calculateSleepDuration(settings.timeout, true, false);
+            }
+            if (settings.chargerMode != prevChargerMode) {
+               chargeMode(settings.chargerMode);
+            }
          }
       }
 
@@ -2675,7 +2634,7 @@ void loop() {
             setSuccess = 0;
             if (tempLastModified.length() > 0) {
                settings.lastModified = tempLastModified;
-               saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+               saveSettings();
                tempLastModified = "";
             }
          }
@@ -2685,7 +2644,7 @@ void loop() {
             if (setSuccess == 0 && dlSuccess == 0) {
                if (tempLastModified.length() > 0) {
                   settings.lastModified = tempLastModified;
-                  saveSettingsToFlash(EEPROM_SETTINGS_ADR);
+                  saveSettings();
                   tempLastModified = "";
                }
             }
