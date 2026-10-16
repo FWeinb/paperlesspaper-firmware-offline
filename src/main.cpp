@@ -295,6 +295,13 @@ void bleWorkerInit();
 void bleWorkerShutdown();
 bool copyFlashFile(SerialFlashFile &inFile, uint32_t rawLength, SerialFlashFile &outFile);
 
+// Debug builds: log the minimum free stack (bytes) the calling task has had so far
+void logStackHighWater(const char *where) {
+#if DEBUG
+   Serial.printf("[STACK] %s: %s min free %u bytes\n", where, pcTaskGetName(NULL), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+#endif
+}
+
 void spiLock() {
    if (spiMutex)
       xSemaphoreTakeRecursive(spiMutex, portMAX_DELAY);
@@ -462,7 +469,7 @@ bool copyFlashFile(SerialFlashFile &inFile, uint32_t rawLength, SerialFlashFile 
       Serial.printf("[IMAGE] Payload too large: %u > %u\n", rawLength, outFile.size());
       return false;
    }
-   // Heap buffer: this runs below processImageFile's large stack frame on the 8 KB loop task
+   // Heap buffer: keeps the 8 KB loop task's stack free
    const uint32_t bufSize = 2048;
    uint8_t *buf = (uint8_t *)malloc(bufSize);
    if (!buf) {
@@ -1821,6 +1828,8 @@ void bleWorkerTask(void *) {
       spiLock();
       bleRunJob(job);
       spiUnlock();
+      if (job.type == BLE_JOB_END_IMAGE || job.type == BLE_JOB_END_FW)
+         logStackHighWater("after BLE upload");
       blePendingJobs--;
    }
 }
@@ -2346,6 +2355,7 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
       rtc_gpio_pulldown_en(GPIO_NUM_0);
       rtc_gpio_pullup_dis(GPIO_NUM_0);
    }
+   logStackHighWater("before deep sleep");
    esp_deep_sleep_start();
    ESP.restart(); // will never reach in deep sleep
 }
@@ -2897,6 +2907,7 @@ int processHttpDownload(String fileName) {
       dlSuccess = loadImageFromWeb(settings.downloadUrl, DOWNLOAD_FILE);
       if (dlSuccess == DL_OK) {
          int imgResult = processImageFile(DOWNLOAD_FILE, downloadedLength, fileName.c_str());
+         logStackHighWater("after image processing");
          if (imgResult == IMG_OK) {
             dlSuccess = 0;
             setImageValid(true);
