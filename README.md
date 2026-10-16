@@ -99,6 +99,7 @@ Alle Einstellungen liegen im NVS-Namespace `settings` (Partition `nvs`, siehe `p
 - `timeout`: Sleep Time in seconds (clamped to 60 – 604800, i.e. 1 min – 7 days)
 - `orientation`: Display Orientation Store
 - `initialized`: First Boot Indicator
+- `cfgVer`: Settings schema version (integer, independent of the firmware version, see below)
 - `battWarn`, `wifiWarn`, `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`
 - `downloadUrl`, `lastModified`, `httpAuthUser`, `httpAuthPass`, `settingsUrl`, `settingsLastMod`
 - `dlCrc`: CRC32 of the last rendered image download, `imgValid`: `tmp.bmp` holds a complete image
@@ -111,6 +112,16 @@ Alle Einstellungen liegen im NVS-Namespace `settings` (Partition `nvs`, siehe `p
 - The external flash holds two fixed-size files, created once at boot: `download.bin` (raw download, up to 2 MB on 7", 6 MB on 13") and `tmp.bmp` (the processed image that gets rendered). If they cannot be created, the external flash is erased once and the files are recreated.
 
 > **First Boot Initialization**: Beim ersten Start (oder wenn `initialized` fehlt) wird der Namespace bereinigt und mit sinnvollen Standardwerten (z.B. Timeout = 3600s) initialisiert.
+
+#### Settings migrations
+
+Settings survive firmware updates (USB or BLE). When a firmware changes the NVS layout, it bumps `SETTINGS_VERSION` in `src/main.cpp` and adds a step to `runMigrations()`:
+
+- `runMigrations()` runs at boot after the first-boot check and before the settings are loaded.
+- It reads `cfgVer` (missing = version 0) and applies one step per version (`0 → 1`, `1 → 2`, …), writing `cfgVer` after each step. A step must be safe to run twice in case power is lost before `cfgVer` is written.
+- A freshly cleared store (first boot, reset) is written with the current version, so no migrations run on it.
+- If `cfgVer` is newer than the firmware (downgrade), nothing is changed.
+- Version 1 only introduces the `cfgVer` key.
 
 ## Remote JSON Settings
 
@@ -203,7 +214,7 @@ Bilder werden in kleine "Checkpoints" (Fenster) unterteilt, um Paketverlusten vo
 Die Firmware wird direkt in die OTA-Partition geflasht. Es gibt keinen Checkpoint-Mechanismus in der Web-UI, dafür wartet sie auf das erfolgreiche Senden jedes einzelnen Pakets:
 1. `START_FW`: Initialisiert den OTA-Prozess (`Update.begin()`).
 2. Senden der Daten (über `Upload Data`): In Chunks. Jeder Chunk wird vom ESP per CRC geprüft und direkt mit `Update.write()` geschrieben.
-3. `END_FW`: Schließt den OTA-Prozess ab (`Update.end()`) und startet das Gerät automatisch in der neuen Firmware neu.
+3. `END_FW`: Schließt den OTA-Prozess ab (`Update.end()`) und startet das Gerät automatisch in der neuen Firmware neu. Einstellungen (WLAN, URL, …) bleiben dabei erhalten.
 
 #### Ablauf: Firmware Upload (via USB / Web Serial)
 Falls Bluetooth nicht verfügbar ist oder du das Gerät lieber direkt per Kabel flashen möchtest, unterstützt die Web-UI das Flashen über die Web Serial API (mittels `esptool-js`):
