@@ -15,6 +15,7 @@ export class DeviceBleInterface {
     this.CHARGER_MODE_UUID = "1000000a-0000-0000-0000-000000000001"; // READ/WRITE
     this.SETTINGS_URL_UUID = "1000000b-0000-0000-0000-000000000001"; // READ/WRITE
     this.AUTO_ROTATION_UUID = "1000000c-0000-0000-0000-000000000001"; // READ/WRITE
+    this.TELEMETRY_UUID = "1000000d-0000-0000-0000-000000000001"; // READ/WRITE
 
     this.DEVICE_DATA_SERVICE_UUID = "7f74170e-7b0e-11ed-a1eb-0242ac120002";
     this.WIFI_SCAN_UUID = "5131a3fc-7b0e-11ed-a1eb-0242ac120002";
@@ -197,6 +198,14 @@ export class DeviceBleInterface {
           settings.autoRotation = autoRotationVal === "1" || autoRotationVal === "true";
         } catch (e) {
           console.warn("Auto Rotation not supported by this firmware", e);
+        }
+
+        try {
+          const telemetryChar = await this.settingsService.getCharacteristic(this.TELEMETRY_UUID);
+          const telemetryVal = new TextDecoder().decode(await telemetryChar.readValue());
+          settings.telemetry = telemetryVal === "1" || telemetryVal === "true";
+        } catch (e) {
+          console.warn("Telemetry setting not supported by this firmware", e);
         }
 
         const settingsUrlChar = await this.settingsService.getCharacteristic(this.SETTINGS_URL_UUID);
@@ -407,6 +416,11 @@ export class DeviceBleInterface {
 
         const settingsUrlChar = await this.settingsService.getCharacteristic(this.SETTINGS_URL_UUID);
         await settingsUrlChar.writeValue(encoder.encode(settings.settingsUrl || ""));
+
+        if (settings.telemetry !== undefined) {
+          const telemetryChar = await this.settingsService.getCharacteristic(this.TELEMETRY_UUID);
+          await telemetryChar.writeValue(encoder.encode(settings.telemetry ? "1" : "0"));
+        }
       } catch (e) {
         console.warn("Alte Firmware: Erweiterte Settings werden ignoriert", e);
       }
@@ -431,6 +445,7 @@ export class DeviceBleInterface {
       if (type === 'motionWakeup') charUUID = this.MOTION_WAKEUP_UUID;
       if (type === 'chargerMode') charUUID = this.CHARGER_MODE_UUID;
       if (type === 'autoRotation') charUUID = this.AUTO_ROTATION_UUID;
+      if (type === 'telemetry') charUUID = this.TELEMETRY_UUID;
       
       if (charUUID) {
         const char = await this.settingsService.getCharacteristic(charUUID);

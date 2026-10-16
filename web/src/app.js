@@ -52,6 +52,7 @@ const settingHttpAuthPassword = document.getElementById("settingHttpAuthPassword
 const settingMotionWakeup = document.getElementById("settingMotionWakeup");
 const settingChargerMode = document.getElementById("settingChargerMode");
 const settingAutoRotation = document.getElementById("settingAutoRotation");
+const settingTelemetry = document.getElementById("settingTelemetry");
 const btnToggleHttpAuthPass = document.getElementById("btnToggleHttpAuthPass");
 const eyeHttpAuthIconOpen = document.getElementById("eyeHttpAuthIconOpen");
 const eyeHttpAuthIconClosed = document.getElementById("eyeHttpAuthIconClosed");
@@ -394,6 +395,7 @@ bleInterface.onSettingsLoaded = (settings) => {
   if (settings.motionWakeup !== undefined) settingMotionWakeup.checked = settings.motionWakeup;
   if (settings.chargerMode !== undefined) settingChargerMode.checked = settings.chargerMode;
   if (settings.autoRotation !== undefined) settingAutoRotation.checked = settings.autoRotation;
+  if (settings.telemetry !== undefined) settingTelemetry.checked = settings.telemetry;
   if (settings.settingsUrl !== undefined) settingSettingsUrl.value = settings.settingsUrl;
   if (settings.wifiSsid !== undefined) {
     wifiSsid.value = settings.wifiSsid;
@@ -484,6 +486,7 @@ btnSaveSettings.addEventListener("click", async () => {
     motionWakeup: settingMotionWakeup.checked,
     chargerMode: settingChargerMode.checked,
     autoRotation: settingAutoRotation.checked,
+    telemetry: settingTelemetry.checked,
     settingsUrl: settingSettingsUrl.value,
   };
 
@@ -540,6 +543,7 @@ document.getElementById("btnApplyJson")?.addEventListener("click", async () => {
   if (tempJsonSettings.motionWakeup !== undefined) settingMotionWakeup.checked = tempJsonSettings.motionWakeup;
   if (tempJsonSettings.chargerMode !== undefined) settingChargerMode.checked = tempJsonSettings.chargerMode;
   if (tempJsonSettings.autoRotation !== undefined) settingAutoRotation.checked = tempJsonSettings.autoRotation;
+  if (tempJsonSettings.telemetry !== undefined) settingTelemetry.checked = tempJsonSettings.telemetry;
 
   document.getElementById("btnSaveSettings").click();
 });
@@ -567,6 +571,12 @@ settingAutoRotation.addEventListener("change", async (e) => {
   settingAutoRotation.disabled = true;
   await bleInterface.directSaveSetting("autoRotation", settingAutoRotation.checked);
   settingAutoRotation.disabled = false;
+});
+
+settingTelemetry.addEventListener("change", async (e) => {
+  settingTelemetry.disabled = true;
+  await bleInterface.directSaveSetting("telemetry", settingTelemetry.checked);
+  settingTelemetry.disabled = false;
 });
 
 let activeAutoOptions = null;

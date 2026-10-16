@@ -3,6 +3,7 @@
   "motionWakeup": false,
   "chargerMode": false,
   "autoRotation": true,
+  "telemetry": true,
   "downloadUrl": "https://paperlesspaper.de/b?d=MY_DEVICE_ID",
   "httpAuthUser": "",
   "httpAuthPassword": ""

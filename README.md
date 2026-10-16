@@ -100,14 +100,16 @@ Alle Einstellungen liegen im NVS-Namespace `settings` (Partition `nvs`, siehe `p
 - `orientation`: Display Orientation Store
 - `initialized`: First Boot Indicator
 - `cfgVer`: Settings schema version (integer, independent of the firmware version, see below)
-- `battWarn`, `wifiWarn`, `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`
+- `battWarn`, `wifiWarn`, `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`, `telemetry`
 - `downloadUrl`, `lastModified`, `httpAuthUser`, `httpAuthPass`, `settingsUrl`, `settingsLastMod`
 - `dlCrc`: CRC32 of the last rendered image download, `imgValid`: `tmp.bmp` holds a complete image
 
 ### Image download
 
 - The image request sends `If-Modified-Since` (from the last rendered download); `304 Not Modified` skips the refresh. If the server sends no `Last-Modified`, a CRC32 of the downloaded bytes is compared with the last rendered one instead, so an unchanged image is not redrawn.
+- A `#fragment` in the image or settings URL is stripped when the URL is set (BLE, `settings.json`) or loaded.
 - Redirects (also between `http` and `https`) are followed. Chunked responses and responses without `Content-Length` are supported.
+- **Telemetry** (setting `telemetry`, default on): the image request gets these query parameters appended: `voltage` (mV), `usb` (0/1), `charging` (0/1), `orientation` (0–3, accelerometer), `width` / `height` (panel pixels), `fw` (firmware version). Example: `image.bmp?voltage=4120&usb=0&charging=0&orientation=1&width=800&height=480&fw=0.0.0`. Turn it off to request the URL unchanged.
 - Only `200` and `304` count as success. Network errors and `5xx` are retried (up to 6 attempts); `4xx`, oversized downloads and undecodable images are not.
 - The external flash holds two fixed-size files, created once at boot: `download.bin` (raw download, up to 2 MB on 7", 6 MB on 13") and `tmp.bmp` (the processed image that gets rendered). If they cannot be created, the external flash is erased once and the files are recreated.
 
@@ -191,6 +193,7 @@ Verwaltet alle Einstellungen und kümmert sich um den Upload von Bildern und Fir
 | `10000009-...` | **Motion Wakeup** | Read, Write | `1` / `true` = Aufwecken bei Bewegung aktiviert (nur URL Modus). |
 | `1000000a-...` | **Charger Mode** | Read, Write | `1` / `true` = Ladefunktion für NiMH-Akkus aktiviert. |
 | `1000000c-...` | **Auto Rotation** | Read, Write | `1` / `true` = Automatische Bildschirmausrichtung via Accelerometer aktiviert. |
+| `1000000d-...` | **Telemetry** | Read, Write | `1` / `true` = Telemetrie-Parameter an die Bild-URL anhängen (Standard: an). |
 
 ---
 

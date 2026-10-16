@@ -157,6 +157,7 @@ Settings settings = {
     .settingsUrl = "",
     .settingsLastModified = "",
     .autoRotation = true,
+    .telemetry = true,
     .forceDownload = false,
     .skipSetupMode = false,
     .imageValid = true};
@@ -256,6 +257,12 @@ bool connectWifi(uint32_t timeoutMs = 20000);
 SerialFlashFile openErasedFile(const char *fileName);
 void invalidateDownloadCache();
 void setImageValid(bool valid);
+
+// Drop a "#fragment": it is never sent to the server and would end up in front of appended query params
+String stripUrlFragment(String url) {
+   int hashPos = url.indexOf('#');
+   return (hashPos >= 0) ? url.substring(0, hashPos) : url;
+}
 
 uint32_t calcCRC32(const uint8_t *data, size_t len) {
    return crc32_le(0, data, len);
@@ -883,6 +890,7 @@ void saveSettings() {
    settingsStore.putString("settingsUrl", settings.settingsUrl);
    settingsStore.putString("settingsLastMod", settings.settingsLastModified);
    settingsStore.putBool("autoRotation", settings.autoRotation);
+   settingsStore.putBool("telemetry", settings.telemetry);
    Serial.println("[MEM] Settings saved");
 }
 
@@ -894,7 +902,7 @@ void restoreSettings() {
    settings.showWifiWarning = settingsStore.getBool("wifiWarn", true);
    settings.sleepDisabled = settingsStore.getBool("sleepDisabled", false);
    settings.imageMode = settingsStore.getInt("imageMode", 1);
-   settings.downloadUrl = settingsStore.getString("downloadUrl", "");
+   settings.downloadUrl = stripUrlFragment(settingsStore.getString("downloadUrl", ""));
    settings.lastModified = settingsStore.getString("lastModified", "");
    settings.downloadCrc = settingsStore.getUInt("dlCrc", 0);
    settings.imageValid = settingsStore.getBool("imgValid", true);
@@ -902,9 +910,10 @@ void restoreSettings() {
    settings.httpAuthPassword = settingsStore.getString("httpAuthPass", "");
    settings.motionWakeup = settingsStore.getBool("motionWakeup", false);
    settings.chargerMode = settingsStore.getBool("chargerMode", false);
-   settings.settingsUrl = settingsStore.getString("settingsUrl", "");
+   settings.settingsUrl = stripUrlFragment(settingsStore.getString("settingsUrl", ""));
    settings.settingsLastModified = settingsStore.getString("settingsLastMod", "");
    settings.autoRotation = settingsStore.getBool("autoRotation", true);
+   settings.telemetry = settingsStore.getBool("telemetry", true);
    Serial.println("[MEM] Settings restored");
    if (DEBUG_FLAG) {
       Serial.printf("[MEM] Settings - BatteryWarning: %d WifiWarning: %d SleepDisabled: %d ImageMode: %d MotionWakeup: %d ChargerMode: %d\n", settings.showBatteryWarning, settings.showWifiWarning, settings.sleepDisabled, settings.imageMode, settings.motionWakeup, settings.chargerMode);
@@ -975,7 +984,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
          Serial.printf("[BLE] Set wifi SSID: %s\n", wifiSettings.ssid.c_str());
       }
       else if (uuidStr == "10000001-0000-0000-0000-000000000001") {
-         settings.downloadUrl = pCharacteristic->getValue();
+         settings.downloadUrl = stripUrlFragment(pCharacteristic->getValue().c_str());
          invalidateDownloadCache(); // force a full download for the new URL
          Serial.printf("[BLE] Set URL: %s\n", settings.downloadUrl.c_str());
          if (settings.downloadUrl.length() > 0) {
@@ -1011,8 +1020,14 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
          Serial.printf("[BLE] Auto Rotation updated to: %d\n", settings.autoRotation);
          saveSettings();
       }
+      else if (uuidStr == "1000000d-0000-0000-0000-000000000001") {
+         String val = pCharacteristic->getValue().c_str();
+         settings.telemetry = (val == "1" || val == "true");
+         Serial.printf("[BLE] Telemetry updated to: %d\n", settings.telemetry);
+         saveSettings();
+      }
       else if (pCharacteristic->getUUID().toString() == "1000000b-0000-0000-0000-000000000001") {
-         settings.settingsUrl = pCharacteristic->getValue().c_str();
+         settings.settingsUrl = stripUrlFragment(pCharacteristic->getValue().c_str());
          Serial.printf("[BLE] Set Settings URL: %s\n", settings.settingsUrl.c_str());
          settings.settingsLastModified = ""; // Reset cache on new URL
       }
@@ -1265,6 +1280,7 @@ bool BleInit(String deviceId, bool enable) {
    NimBLECharacteristic *motionWakeupCharacteristic = epaperSettingsService->createCharacteristic("10000009-0000-0000-0000-000000000001", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
    NimBLECharacteristic *chargerModeCharacteristic = epaperSettingsService->createCharacteristic("1000000a-0000-0000-0000-000000000001", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
    NimBLECharacteristic *autoRotationCharacteristic = epaperSettingsService->createCharacteristic("1000000c-0000-0000-0000-000000000001", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+   NimBLECharacteristic *telemetryCharacteristic = epaperSettingsService->createCharacteristic("1000000d-0000-0000-0000-000000000001", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
 
    wifiSsidCharacteristic->setCallbacks(&chrCallbacks);
    wifiPwCharacteristic->setCallbacks(&chrCallbacks);
@@ -1280,6 +1296,7 @@ bool BleInit(String deviceId, bool enable) {
    motionWakeupCharacteristic->setCallbacks(&chrCallbacks);
    chargerModeCharacteristic->setCallbacks(&chrCallbacks);
    autoRotationCharacteristic->setCallbacks(&chrCallbacks);
+   telemetryCharacteristic->setCallbacks(&chrCallbacks);
 
    // Services are started when the server is started
 
@@ -1317,6 +1334,7 @@ bool BleInit(String deviceId, bool enable) {
    motionWakeupCharacteristic->setValue(settings.motionWakeup ? "1" : "0");
    chargerModeCharacteristic->setValue(settings.chargerMode ? "1" : "0");
    autoRotationCharacteristic->setValue(settings.autoRotation ? "1" : "0");
+   telemetryCharacteristic->setValue(settings.telemetry ? "1" : "0");
 
    pAdvertising = NimBLEDevice::getAdvertising();
    pAdvertising->setName(deviceId.c_str());
@@ -1689,16 +1707,26 @@ bool sdInit() {
    return false;
 }
 
-// Append device telemetry (same fields as the BLE system info) as query parameters
+// Append device telemetry as query parameters if the telemetry setting is on (stored URLs never contain a #fragment)
 String appendTelemetryParams(String url) {
+   if (!settings.telemetry)
+      return url;
    bool isCharging = false;
    if (settings.chargerMode) {
       isCharging = chargeMode(settings.chargerMode);
    }
+   // With autoRotation the orientation was read at the start of loop(); otherwise read it without touching the display rotation
+   int orientation = settings.autoRotation ? systemData.deviceOrientation : accInit();
+
    url += (url.indexOf('?') >= 0) ? "&" : "?";
    url += "voltage=" + String(systemData.vddValue);
    url += "&usb=" + String(systemData.usbConnected ? 1 : 0);
    url += "&charging=" + String(isCharging ? 1 : 0);
+   if (orientation >= 0)
+      url += "&orientation=" + String(orientation);
+   url += "&width=" + String(EPD_WIDTH);
+   url += "&height=" + String(EPD_HEIGHT);
+   url += "&fw=" + String(SOFTWARE_VERSION);
    return url;
 }
 
@@ -2459,8 +2487,12 @@ void fetchRemoteSettings() {
             settings.autoRotation = doc["autoRotation"];
             changed = true;
          }
+         if (doc["telemetry"].is<bool>()) {
+            settings.telemetry = doc["telemetry"];
+            changed = true;
+         }
          if (doc["downloadUrl"].is<String>()) {
-            String newUrl = doc["downloadUrl"].as<String>();
+            String newUrl = stripUrlFragment(doc["downloadUrl"].as<String>());
             if (newUrl != settings.downloadUrl)
                invalidateDownloadCache();
             settings.downloadUrl = newUrl;

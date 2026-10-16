@@ -90,6 +90,7 @@ struct Settings
    String settingsUrl;
    String settingsLastModified;
    bool autoRotation;
+   bool telemetry; // append device telemetry as query params to the image URL
    bool forceDownload;
    bool skipSetupMode;
    bool imageValid; // IMAGE_FILE holds a complete image
