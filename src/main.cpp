@@ -89,6 +89,7 @@
 
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
 #define SETTINGS_NAMESPACE "settings" // NVS namespace for all persistent settings
+#define SETTINGS_VERSION 1            // NVS schema version (key "cfgVer"), independent of SOFTWARE_VERSION; bump + add a migration step when the layout changes
 #define BLE_BUFFER_SIZE 19200
 
 #define DEFAULT_SLEEP 3600 // Default time how long to sleep after update
@@ -841,8 +842,30 @@ bool settingsStoreInit() {
 
 bool settingsStoreClear() {
    settingsStore.clear();
+   // A cleared store holds no old-layout data, so it is already at the current schema version
+   settingsStore.putInt("cfgVer", SETTINGS_VERSION);
    Serial.println("[MEM] settings store clear OK");
    return true;
+}
+
+// Upgrade the NVS layout step by step (N -> N+1) from the stored "cfgVer" (missing = v0) to SETTINGS_VERSION.
+// Runs before restoreSettings(). Each step must be safe to re-run if power is lost before cfgVer is written.
+void runMigrations() {
+   int ver = settingsStore.getInt("cfgVer", 0);
+   if (ver > SETTINGS_VERSION) {
+      Serial.printf("[MEM] Settings v%d are newer than this firmware (v%d), leaving them as they are\n", ver, SETTINGS_VERSION);
+      return;
+   }
+   while (ver < SETTINGS_VERSION) {
+      Serial.printf("[MEM] Migrating settings v%d -> v%d\n", ver, ver + 1);
+      switch (ver) {
+      case 0:
+         // v0 -> v1: introduces the cfgVer key itself, no data changes
+         break;
+      }
+      ver++;
+      settingsStore.putInt("cfgVer", ver);
+   }
 }
 
 void saveSettings() {
@@ -944,7 +967,7 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
       // Für String-Werte eine sichere Konvertierung mit dem richtigen c_str()
       if (uuidStr == "a62eed84-7b0d-11ed-a1eb-0242ac120002") {
          wifiSettings.pss = pCharacteristic->getValue().c_str();
-         Serial.printf("[BLE] Set wifi PASS: %s\n", wifiSettings.pss.c_str());
+         Serial.println("[BLE] Set wifi password");
          wifiSettings.isDeployWifi = true;
       }
       else if (uuidStr == "090b0ef2-7b0d-11ed-a1eb-0242ac120002") {
@@ -1107,7 +1130,6 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks
             if (Update.end(true)) {
                Serial.println("[BLE] Firmware Update SUCCESS. Rebooting...");
                delay(500);
-               resetAll(true);
                ESP.restart();
             }
             else {
@@ -2573,6 +2595,7 @@ void setup() {
    gpio_set_drive_capability((gpio_num_t)SCK_PIN, GPIO_DRIVE_CAP_1);
    gpio_set_drive_capability((gpio_num_t)MOSI_PIN, GPIO_DRIVE_CAP_1);
    initFirstBoot();
+   runMigrations();
 
    // Load credentials & settings from NVS
    restoreSettings();
