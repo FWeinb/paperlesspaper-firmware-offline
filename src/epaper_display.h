@@ -64,4 +64,3 @@ int setImageFromFS(String fileName, bool doRefresh = true);
 void displayWipe(bool quick);
 void displaySetText(String info, bool isBlackboard, bool quickRefresh = true);
 bool waitDisplayComplete(bool quick);
-void displayTurnOn();
