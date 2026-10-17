@@ -10,7 +10,9 @@
 // #include <SD_MMC.h>
 #include "Adafruit_GFX.h"
 #include "SPIFFS.h"
-#include "SdFat.h"
+#ifdef EPD_TYPE_13INCH
+#include "SdFat.h" // SD NAND only on the 13" board
+#endif
 #include "Ticker.h"
 #include "driver/rtc_io.h"
 #include "kxtj3-1057.h"
@@ -34,7 +36,9 @@
 #define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO) // 2 ^ GPIO_NUMBER in hex
 
 // Pins
+#ifdef EPD_TYPE_13INCH
 #define CS_SD_PIN 13
+#endif
 #define DISP_POWER 12
 
 // flash
@@ -176,7 +180,9 @@ Ticker onceDisplay;
 SerialFlashFile saveFile;
 SerialFlashFile rawOutFile;
 SerialFlashFile jpgInFile;
+#ifdef EPD_TYPE_13INCH
 SdFs sd;
+#endif
 RTC_DATA_ATTR timeval previousWakeup = timeval{.tv_sec = 0, .tv_usec = 0};
 // Download failures (#15): keep the last image, retry with backoff, show an error badge after DL_FAIL_BADGE_AFTER failures
 #define DL_FAIL_BADGE_AFTER 3
@@ -263,7 +269,9 @@ bool resetAll(bool resetWifi);
 wakeup_reason_t getWakeupReason();
 void runSetupMode();
 int processHttpDownload(String fileName);
+#ifdef EPD_TYPE_13INCH
 bool sdInit(void);
+#endif
 void accUpdateOrient();
 bool connectWifi(uint32_t timeoutMs = 20000);
 SerialFlashFile openErasedFile(const char *fileName);
@@ -2104,6 +2112,7 @@ void debugFS() {
    DEBUG_LOG("[MAIN] SPIFFS usage %d/%d heap free: %d/%d\n", SPIFFS.usedBytes(), SPIFFS.totalBytes(), ESP.getFreeHeap(), ESP.getHeapSize());
 }
 
+#ifdef EPD_TYPE_13INCH
 void sdTest() {
    // Test read/write
    FsFile testFile;
@@ -2173,6 +2182,7 @@ bool sdInit() {
    }
    return false;
 }
+#endif
 
 // Append device telemetry as query parameters if the telemetry setting is on (stored URLs never contain a #fragment)
 String appendTelemetryParams(String url) {
@@ -3074,12 +3084,16 @@ void setup() {
    pinMode(RST_PIN, OUTPUT);
    pinMode(CS_EPD_PIN, OUTPUT);
    pinMode(EPD_CS_S, OUTPUT);
+#ifdef EPD_TYPE_13INCH
    pinMode(CS_SD_PIN, OUTPUT);
+#endif
    pinMode(SCK_PIN, OUTPUT);
    pinMode(MOSI_PIN, OUTPUT);
    digitalWrite(CS_EPD_PIN, HIGH);
    digitalWrite(EPD_CS_S, HIGH);
+#ifdef EPD_TYPE_13INCH
    digitalWrite(CS_SD_PIN, HIGH);
+#endif
 
    gpio_set_drive_capability((gpio_num_t)SCK_PIN, GPIO_DRIVE_CAP_1);
    gpio_set_drive_capability((gpio_num_t)MOSI_PIN, GPIO_DRIVE_CAP_1);
