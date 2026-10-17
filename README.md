@@ -104,7 +104,7 @@ Alle Einstellungen liegen im NVS-Namespace `settings` (Partition `nvs`, siehe `p
 - `orientation`: Display Orientation Store
 - `initialized`: First Boot Indicator
 - `cfgVer`: Settings schema version (integer, independent of the firmware version, see below)
-- `battWarn`, `wifiWarn`, `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`, `telemetry`
+- `sleepDisabled`, `imageMode`, `motionWakeup`, `chargerMode`, `autoRotation`, `telemetry`
 - `downloadUrl`, `lastModified`, `httpAuthUser`, `httpAuthPass`, `settingsUrl`, `settingsLastMod`
 - `dlCrc`: CRC32 of the last rendered image download, `imgValid`: `tmp.bmp` holds a complete image
 
@@ -129,6 +129,7 @@ Settings survive firmware updates (USB or BLE). When a firmware changes the NVS 
 - A freshly cleared store (first boot, reset) is written with the current version, so no migrations run on it.
 - If `cfgVer` is newer than the firmware (downgrade), nothing is changed.
 - Version 1 only introduces the `cfgVer` key.
+- Version 2 removes the unused `battWarn` and `wifiWarn` keys.
 
 ## Remote JSON Settings
 
