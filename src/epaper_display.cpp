@@ -160,62 +160,6 @@ void displaySetErrorBadge(bool enable) {
    errorBadge = enable;
 }
 
-// 7": the image buffer is landscape, but the frame is viewed like the text (rotationText), so draw the
-// badge with GFX in text rotation into the top right corner as the viewer sees it
-static void drawErrorBadge() {
-   const int size = EPD_WIDTH / 20;
-   const int margin = size / 2;
-   const int border = max(2, size / 16);
-   const int barHalfWidth = max(2, size / 12);
-   display.setRotation(displaySettings.rotationText);
-   const int x0 = display.width() - margin - size;
-   const int y0 = margin;
-   display.fillRect(x0, y0, size, size, GxEPD_BLACK);
-   display.fillRect(x0 + border, y0 + border, size - 2 * border, size - 2 * border, GxEPD_RED);
-   const int barX = x0 + size / 2 - barHalfWidth;
-   display.fillRect(barX, y0 + size * 20 / 100, 2 * barHalfWidth, size * 42 / 100, GxEPD_WHITE);
-   display.fillRect(barX, y0 + size * 72 / 100, 2 * barHalfWidth, size * 12 / 100, GxEPD_WHITE);
-   display.setRotation(displaySettings.rotationPicture);
-}
-// 13": text and picture share the rotation, so image coordinates are what the viewer sees.
-// The badge is applied to the raw pixel data before the 180° flip.
-
-// Returns the palette nibble for image pixel (x, y): badge color inside the badge, else the image's nibble
-static uint8_t errorBadgeNibble(int x, int y, int imageWidth, uint8_t nibble) {
-   const int size = EPD_WIDTH / 20;
-   const int margin = size / 2;
-   const int lx = x - (imageWidth - margin - size);
-   const int ly = y - margin;
-   if (lx < 0 || ly < 0 || lx >= size || ly >= size)
-      return nibble;
-   const int border = max(2, size / 16);
-   if (lx < border || ly < border || lx >= size - border || ly >= size - border)
-      return 0; // black
-   const int barHalfWidth = max(2, size / 12);
-   if (abs(lx - size / 2) < barHalfWidth) {
-      if ((ly >= size * 20 / 100 && ly < size * 62 / 100) || (ly >= size * 72 / 100 && ly < size * 84 / 100))
-         return 6; // white
-   }
-   return 3; // red
-}
-
-static bool errorBadgeRow(int y) {
-   const int size = EPD_WIDTH / 20;
-   return errorBadge && y >= size / 2 && y < size / 2 + size;
-}
-
-// Apply the badge to one line of packed 4-bit pixels (high nibble = left pixel) starting at image pixel xStart
-static void errorBadgeLine(uint8_t *buf, int bytes, int xStart, int y, int imageWidth) {
-   if (!errorBadgeRow(y))
-      return;
-   for (int b = 0; b < bytes; b++) {
-      int x = xStart + b * 2;
-      uint8_t high = errorBadgeNibble(x, y, imageWidth, buf[b] >> 4);
-      uint8_t low = errorBadgeNibble(x + 1, y, imageWidth, buf[b] & 0x0F);
-      buf[b] = (high << 4) | low;
-   }
-}
-
 void displaySetOverlayOption(DisplayInfoKey key, bool value) {
    switch (key) {
    case DisplayInfoKey::VERSION:
@@ -345,17 +289,180 @@ void displayOverlays(DisplayType &display, DisplayInfo displayData, bool invertC
    }
 }
 
-int setImageFromFS_7inch(String fileName) {
+// tmp.bmp holds the image in panel order: PANEL_ROWS rows of PANEL_COLS packed 4-bit pixels (high nibble =
+// left pixel). The 13" panel is portrait in memory; each row is split across its two controllers.
+#ifdef EPD_TYPE_13INCH
+#define PANEL_COLS EPD_HEIGHT
+#define PANEL_ROWS EPD_WIDTH
+#else
+#define PANEL_COLS EPD_WIDTH
+#define PANEL_ROWS EPD_HEIGHT
+#endif
+#define PANEL_ROW_BYTES (PANEL_COLS / 2)
+
+// Palette nibble as stored in tmp.bmp -> native color code (same on both panels)
+static const uint8_t nativeColor[16] = {
+    0x0, // 0 black
+    0x5, // 1 blue
+    0x6, // 2 green
+    0x3, // 3 red
+    0x1, // 4 unused -> white
+    0x2, // 5 yellow
+    0x1, // 6 white
+    0x1, 0x1, 0x1, 0x1, 0x1, 0x1, 0x1, 0x1, 0x1};
+
+// The badge sits in the top right corner as the viewer sees it, i.e. in text coordinates (rotationText).
+// Map panel pixel (px, py) to text coordinates (inverse of the GFX rotation).
+static void panelToText(int px, int py, int &tx, int &ty) {
+   switch (displaySettings.rotationText) {
+   case 1:
+      tx = py;
+      ty = PANEL_COLS - 1 - px;
+      break;
+   case 2:
+      tx = PANEL_COLS - 1 - px;
+      ty = PANEL_ROWS - 1 - py;
+      break;
+   case 3:
+      tx = PANEL_ROWS - 1 - py;
+      ty = px;
+      break;
+   default:
+      tx = px;
+      ty = py;
+      break;
+   }
+}
+
+// Returns the palette nibble for text pixel (x, y): badge color inside the badge, else the image's nibble
+static uint8_t errorBadgeNibble(int x, int y, int textWidth, uint8_t nibble) {
+   const int size = EPD_WIDTH / 20;
+   const int margin = size / 2;
+   const int lx = x - (textWidth - margin - size);
+   const int ly = y - margin;
+   if (lx < 0 || ly < 0 || lx >= size || ly >= size)
+      return nibble;
+   const int border = max(2, size / 16);
+   if (lx < border || ly < border || lx >= size - border || ly >= size - border)
+      return 0; // black
+   const int barHalfWidth = max(2, size / 12);
+   if (lx >= size / 2 - barHalfWidth && lx < size / 2 + barHalfWidth) {
+      if ((ly >= size * 20 / 100 && ly < size * 20 / 100 + size * 42 / 100) || (ly >= size * 72 / 100 && ly < size * 72 / 100 + size * 12 / 100))
+         return 6; // white
+   }
+   return 3; // red
+}
+
+// Apply the badge to one panel row (py) of palette nibbles
+static void errorBadgeRow(uint8_t *row, int py) {
+   const int size = EPD_WIDTH / 20;
+   const int margin = size / 2;
+   const int textWidth = (displaySettings.rotationText & 1) ? PANEL_ROWS : PANEL_COLS;
+   // Skip rows the badge can't touch: one text coordinate depends on py only
+   int tx, ty;
+   panelToText(0, py, tx, ty);
+   if (displaySettings.rotationText & 1) {
+      if (tx < textWidth - margin - size || tx >= textWidth - margin)
+         return;
+   }
+   else if (ty < margin || ty >= margin + size)
+      return;
+   for (int b = 0; b < PANEL_ROW_BYTES; b++) {
+      uint8_t nibbles[2] = {uint8_t(row[b] >> 4), uint8_t(row[b] & 0x0F)};
+      for (int n = 0; n < 2; n++) {
+         panelToText(b * 2 + n, py, tx, ty);
+         nibbles[n] = errorBadgeNibble(tx, ty, textWidth, nibbles[n]);
+      }
+      row[b] = (nibbles[0] << 4) | nibbles[1];
+   }
+}
+
+// Panel specific transfer of native rows. Callers hold the SPI bus (flash and display share it), and the
+// display CS is released between chunks so the flash can be read in between.
+#ifdef EPD_TYPE_13INCH
+static void beginImageWrite() {
+   display.init(115200);
+   // The controller init is private in the driver; a tiny write runs it (the image overwrites the patch)
+   static const uint8_t white[4] = {0x11, 0x11, 0x11, 0x11};
+   display.epd2.writeImage(white, 0, 0, 4, 2);
+}
+
+// No DC line: every CS frame starts with a command, so each chunk gets its own window and DTM per controller
+static void writeImageRows(const uint8_t *buf, int py0, int rows) {
+   const uint16_t HRST = 0;
+   const uint16_t HRED = PANEL_COLS - 1; // window units are half the controller width in pixels
+   const uint16_t VRST = py0 / 2;
+   const uint16_t VRED = (py0 + rows) / 2 - 1;
+   const uint8_t window[9] = {uint8_t(HRST >> 8), uint8_t(HRST & 0xFF), uint8_t(HRED >> 8), uint8_t(HRED & 0xFF),
+                              uint8_t(VRST >> 8), uint8_t(VRST & 0xFF), uint8_t(VRED >> 8), uint8_t(VRED & 0xFF),
+                              0x01}; // PTLW_ENABLE
+   const int halfBytes = PANEL_ROW_BYTES / 2;
+
+   epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
+   for (int half = 0; half < 2; half++) {
+      const int csPin = (half == 0) ? CS_EPD_PIN : EPD_CS_S;
+      digitalWrite(csPin, LOW);
+      epd_spi_bus->transfer(0x83); // PTLW (partial window)
+      epd_spi_bus->writeBytes(window, sizeof(window));
+      digitalWrite(csPin, HIGH);
+      digitalWrite(csPin, LOW);
+      epd_spi_bus->transfer(0x91); // PTIN (partial in)
+      digitalWrite(csPin, HIGH);
+      digitalWrite(csPin, LOW);
+      epd_spi_bus->transfer(0x10); // DTM
+      for (int r = 0; r < rows; r++)
+         epd_spi_bus->writeBytes(buf + r * PANEL_ROW_BYTES + half * halfBytes, halfBytes);
+      digitalWrite(csPin, HIGH);
+   }
+   epd_spi_bus->endTransaction();
+}
+
+static void endImageWrite() {
+   // Disable the partial window on both controllers so the refresh covers the full screen
+   const uint8_t noWindow[9] = {0};
+   epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
+   for (int half = 0; half < 2; half++) {
+      const int csPin = (half == 0) ? CS_EPD_PIN : EPD_CS_S;
+      digitalWrite(csPin, LOW);
+      epd_spi_bus->transfer(0x83);
+      epd_spi_bus->writeBytes(noWindow, sizeof(noWindow));
+      digitalWrite(csPin, HIGH);
+   }
+   epd_spi_bus->endTransaction();
+}
+#else
+static void beginImageWrite() {
+   display.init(115200);
+   display.epd2.setPaged(); // runs the controller init if needed and sends DTM (0x10), pixel data follows
+}
+
+// Pixel data continues across CS toggles, so one DTM covers all chunks
+static void writeImageRows(const uint8_t *buf, int py0, int rows) {
+   epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
+   digitalWrite(DC_PIN, HIGH);
+   digitalWrite(CS_EPD_PIN, LOW);
+   epd_spi_bus->writeBytes(buf, rows * PANEL_ROW_BYTES);
+   digitalWrite(CS_EPD_PIN, HIGH);
+   epd_spi_bus->endTransaction();
+}
+
+static void endImageWrite() {
+}
+#endif
+
+// Stream the image from flash to the controller in one pass (no GFX page buffer): read a chunk of rows,
+// flip it if needed, draw the error badge, convert to native colors and send it.
+int setImageFromFS(String fileName, bool doRefresh) {
+   const unsigned long tStart = millis();
    epaperIsUpdating = true;
    saveFile = SerialFlash.open(fileName.c_str());
    if (!saveFile) {
       Serial.println("[BMP] File missing");
+      epaperIsUpdating = false;
       return -1;
    }
 
-   uint16_t width = EPD_WIDTH;
-   uint16_t height = EPD_HEIGHT;
-   int offsetData = 0;
+   uint32_t offsetData = 0;
 
    // Check if the file is a standard BMP (starts with 'BM')
    uint8_t magic[2];
@@ -363,240 +470,91 @@ int setImageFromFS_7inch(String fileName) {
       if (magic[0] == 'B' && magic[1] == 'M') {
          // It's a standard BMP file. Read the pixel data offset at byte 0x0A
          saveFile.seek(0x0A);
-         uint32_t bmpOffset = 0;
-         saveFile.read((uint8_t *)&bmpOffset, 4);
-         offsetData = bmpOffset;
-         Serial.printf("[BMP] Detected Windows BMP. Pixel Data starts at offset: %d\n", offsetData);
+         saveFile.read((uint8_t *)&offsetData, 4);
+         Serial.printf("[BMP] Detected Windows BMP. Pixel Data starts at offset: %u\n", offsetData);
       }
       else {
          Serial.println("[BMP] Detected RAW payload (no BM magic). Reading from byte 0.");
       }
    }
 
-   Serial.printf("[BMP] Loading Image H: %d W: %d\n", height, width);
+   Serial.printf("[BMP] Loading Image H: %d W: %d\n", PANEL_ROWS, PANEL_COLS);
 
-   if (width > EPD_WIDTH || height > EPD_HEIGHT) {
-      Serial.printf("[BMP] Image too wide or tall!");
-      return -1;
+   // About 24 KB per chunk; an even row count keeps the 13" window rows aligned
+   int rowsPerChunk = (24 * 1024 / PANEL_ROW_BYTES) & ~1;
+   uint8_t *chunkBuffer = (uint8_t *)malloc(rowsPerChunk * PANEL_ROW_BYTES);
+   if (!chunkBuffer) {
+      rowsPerChunk = 2;
+      chunkBuffer = (uint8_t *)malloc(rowsPerChunk * PANEL_ROW_BYTES);
+      if (!chunkBuffer) {
+         Serial.println("[BMP] Malloc for chunk buffer failed! Aborting.");
+         saveFile.close();
+         epaperIsUpdating = false;
+         return -1;
+      }
    }
 
+   // Both pixels of a byte at once: palette byte -> native byte
+   uint8_t nativeByte[256];
+   for (int i = 0; i < 256; i++)
+      nativeByte[i] = (nativeColor[i >> 4] << 4) | nativeColor[i & 0x0F];
+
    display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-   display.init(115200);
-   display.setRotation(displaySettings.rotationPicture);
-   display.setFullWindow();
+   beginImageWrite();
    Serial.print("[EPD] Update Display... \n");
 
-   int bufferSize = width / 2;
-   uint8_t *lineBuffer = (uint8_t *)malloc(bufferSize);
+   const bool rotate180 = (displaySettings.rotationPicture > 0);
 
-   display.firstPage();
-   do {
-      display.fillScreen(GxEPD_WHITE);
-      saveFile.seek(offsetData);
+   for (int py0 = 0; py0 < PANEL_ROWS; py0 += rowsPerChunk) {
+      const int rows = min(rowsPerChunk, PANEL_ROWS - py0);
+      const int len = rows * PANEL_ROW_BYTES;
+      // Panel rows [py0, py0 + rows) come from file rows [PANEL_ROWS - py0 - rows, PANEL_ROWS - py0) when flipped
+      const int fileRow = rotate180 ? PANEL_ROWS - py0 - rows : py0;
+      saveFile.seek(offsetData + uint32_t(fileRow) * PANEL_ROW_BYTES);
+      int got = saveFile.read(chunkBuffer, len);
+      if (got < len) {
+         Serial.printf("[BMP] Short read at row %d (%d of %d bytes), padding white\n", fileRow, got, len);
+         memset(chunkBuffer + max(got, 0), 0x66, len - max(got, 0));
+      }
 
-      for (int y = 0; y < height; y++) {
-         saveFile.read(lineBuffer, bufferSize);
-         for (int x = 0; x < width; x++) {
-            uint8_t colorData = lineBuffer[x / 2];
-            uint8_t colorNibble = (x % 2 == 0) ? (colorData >> 4) : (colorData & 0x0F);
-            if (colorNibble != 6) { // Optimization: display is already filled with WHITE (6)
-               display.drawPixel(x, y, getColor(colorNibble));
-            }
+      if (rotate180) {
+         // Reversing the whole chunk reverses the row order and the bytes in each row; swap the nibbles so
+         // the pixels inside each byte are reversed too
+         for (int i = 0, j = len - 1; i < j; i++, j--) {
+            uint8_t t = chunkBuffer[i];
+            chunkBuffer[i] = chunkBuffer[j];
+            chunkBuffer[j] = t;
          }
+         for (int i = 0; i < len; i++)
+            chunkBuffer[i] = (chunkBuffer[i] << 4) | (chunkBuffer[i] >> 4);
       }
-      if (errorBadge)
-         drawErrorBadge();
-   }
-   while (display.nextPage());
 
-   free(lineBuffer);
-   Serial.println("[EPD] End Draw...");
-   epaperIsUpdating = false;
-   return 0;
-}
-
-int setImageFromFS_13inch(String fileName, bool doRefresh) {
-   epaperIsUpdating = true;
-   saveFile = SerialFlash.open(fileName.c_str());
-   if (!saveFile) {
-      Serial.println("[BMP] File missing");
-      return -1;
-   }
-
-   uint16_t width = EPD_WIDTH;
-   uint16_t height = EPD_HEIGHT;
-   int offsetData = 0;
-
-   // Check if the file is a standard BMP (starts with 'BM')
-   uint8_t magic[2];
-   saveFile.seek(0);
-   if (saveFile.read(magic, 2) == 2) {
-      if (magic[0] == 'B' && magic[1] == 'M') {
-         // It's a standard BMP file. Read the pixel data offset at byte 0x0A
-         saveFile.seek(0x0A);
-         uint32_t bmpOffset = 0;
-         saveFile.read((uint8_t *)&bmpOffset, 4);
-         offsetData = bmpOffset;
-         Serial.printf("[BMP] Detected Windows BMP. Pixel Data starts at offset: %d\n", offsetData);
+      if (errorBadge) {
+         for (int r = 0; r < rows; r++)
+            errorBadgeRow(chunkBuffer + r * PANEL_ROW_BYTES, py0 + r);
       }
-      else {
-         Serial.println("[BMP] Detected RAW payload (no BM magic). Reading from byte 4.");
-         offsetData = 0;
-      }
-   }
 
-   Serial.printf("[BMP] Loading Image H: %d W: %d\n", height, width);
+      for (int i = 0; i < len; i++)
+         chunkBuffer[i] = nativeByte[chunkBuffer[i]];
 
-   if (width > EPD_WIDTH || height > EPD_HEIGHT) {
-      Serial.printf("[BMP] Image too wide or tall!");
-      return -1;
-   }
-
-   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-   display.init(115200);
-   display.clearScreen(0x01); // Clear screen memory
-
-   // EPD physical resolution is 1200x1600 (2 controllers of 600x1600 each)
-   const int physWidth = EPD_HEIGHT;
-   const int physHeight = EPD_WIDTH;
-
-   int numChunks = 16;
-   int linesPerChunk = physHeight / numChunks;
-   int bytesPerHalfLine = physWidth / 4;
-
-   uint8_t *chunkBuffer = (uint8_t *)malloc(linesPerChunk * bytesPerHalfLine);
-   if (!chunkBuffer) {
-      Serial.println("[BMP] Malloc for 16 chunks failed! Trying 32 chunks...");
-      numChunks = 32;
-      linesPerChunk = physHeight / numChunks;
-      chunkBuffer = (uint8_t *)malloc(linesPerChunk * bytesPerHalfLine);
-
-      if (!chunkBuffer) {
-         Serial.println("[BMP] Malloc for 32 chunks failed! Trying 64 chunks...");
-         numChunks = 64;
-         linesPerChunk = physHeight / numChunks;
-         chunkBuffer = (uint8_t *)malloc(linesPerChunk * bytesPerHalfLine);
-
-         if (!chunkBuffer) {
-            Serial.println("[BMP] Malloc for 64 chunks failed! Aborting.");
-            return -1;
-         }
-      }
-   }
-
-   Serial.println("[EPD] Streaming Partial Image to Display... ");
-
-   for (int half = 0; half < 2; half++) {
-      int csPin = (half == 0) ? CS_EPD_PIN : EPD_CS_S;
-
-      for (int chunk = 0; chunk < numChunks; chunk++) {
-         int yImageStart = chunk * linesPerChunk;
-
-         uint16_t xStartCtrl = 0;
-         uint16_t xPixel = physWidth / 2; // 600 Pixel
-         uint16_t HRST = xStartCtrl * 2;
-         uint16_t HRED = (xStartCtrl + xPixel) * 2 - 1; // 1199
-         uint16_t VRST = yImageStart / 2;
-         uint16_t VRED = (yImageStart + linesPerChunk) / 2 - 1;
-
-         bool rotate180 = (displaySettings.rotationPicture > 0);
-
-         for (int i = 0; i < linesPerChunk; i++) {
-            int lineOnDisplay = yImageStart + i;
-            int lineInImage = rotate180 ? (physHeight - 1 - lineOnDisplay) : lineOnDisplay;
-            int srcHalf = rotate180 ? (1 - half) : half;
-
-            int byteOffsetInImage = (lineInImage * 600) + (srcHalf * 300);
-            saveFile.seek(offsetData + byteOffsetInImage);
-
-            if (rotate180) {
-               uint8_t tempLine[300];
-               saveFile.read(tempLine, bytesPerHalfLine);
-               errorBadgeLine(tempLine, bytesPerHalfLine, srcHalf * bytesPerHalfLine * 2, lineInImage, physWidth);
-               for (int b = 0; b < bytesPerHalfLine; b++) {
-                  uint8_t origByte = tempLine[bytesPerHalfLine - 1 - b];
-                  // swap nibbles: left pixel becomes right pixel, right pixel becomes left pixel
-                  chunkBuffer[i * bytesPerHalfLine + b] = ((origByte & 0x0F) << 4) | (origByte >> 4);
-               }
-            }
-            else {
-               saveFile.read(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine);
-               errorBadgeLine(chunkBuffer + i * bytesPerHalfLine, bytesPerHalfLine, srcHalf * bytesPerHalfLine * 2, lineInImage, physWidth);
-            }
-         }
-         SPI.endTransaction();
-         SPI.beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
-
-         // PTLW (Partial Window) Command Setting 0x83
-         digitalWrite(csPin, LOW);
-         SPI.transfer(0x83);
-         SPI.transfer(HRST >> 8);
-         SPI.transfer(HRST & 0xFF);
-         SPI.transfer(HRED >> 8);
-         SPI.transfer(HRED & 0xFF);
-         SPI.transfer(VRST >> 8);
-         SPI.transfer(VRST & 0xFF);
-         SPI.transfer(VRED >> 8);
-         SPI.transfer(VRED & 0xFF);
-         SPI.transfer(0x01); // PTLW_ENABLE
-         digitalWrite(csPin, HIGH);
-         // PTIN (Partial In) command 0x91
-         digitalWrite(csPin, LOW);
-         SPI.transfer(0x91);
-         digitalWrite(csPin, HIGH);
-         // DTM command 0x10
-         digitalWrite(csPin, LOW);
-         SPI.transfer(0x10);
-
-         // Hardware LUT conversion
-         for (int i = 0; i < linesPerChunk * bytesPerHalfLine; i++) {
-            uint8_t low = getColor(chunkBuffer[i] & 0x0F);
-            uint8_t high = getColor(chunkBuffer[i] >> 4);
-            // uint8_t raw = chunkBuffer[i];
-            chunkBuffer[i] = (high << 4) | low;
-         }
-
-         SPI.writeBytes(chunkBuffer, linesPerChunk * bytesPerHalfLine);
-         digitalWrite(csPin, HIGH);
-
-         SPI.endTransaction();
-         delay(1);
-      }
+      writeImageRows(chunkBuffer, py0, rows);
    }
 
    free(chunkBuffer);
+   saveFile.close();
+   endImageWrite();
 
-   Serial.println("[EPD] End Partial Streaming... Refreshing now.");
-
-   // PTLW (Partial Window) für beide Controller wieder deaktivieren,
-   // damit der nachfolgende Refresh (DRF) den gesamten Bildschirm erfasst!
-   digitalWrite(CS_EPD_PIN, LOW);
-   SPI.transfer(0x83);
-   for (int i = 0; i < 9; i++)
-      SPI.transfer(0x00);
-   digitalWrite(CS_EPD_PIN, HIGH);
-
-   digitalWrite(EPD_CS_S, LOW);
-   SPI.transfer(0x83);
-   for (int i = 0; i < 9; i++)
-      SPI.transfer(0x00);
-   digitalWrite(EPD_CS_S, HIGH);
-
+   const unsigned long tData = millis();
+   Serial.printf("[EPD] Image data sent in %lu ms\n", tData - tStart);
    if (doRefresh) {
-      display.refresh();
+      display.epd2.refresh(false);
+      display.epd2.powerOff();
+      const unsigned long tEnd = millis();
+      Serial.printf("[EPD] Refresh %lu ms, total %lu ms\n", tEnd - tData, tEnd - tStart);
    }
 
-   saveFile.close();
    epaperIsUpdating = false;
    return 0;
-}
-
-int setImageFromFS(String fileName, bool doRefresh) {
-#ifdef EPD_TYPE_13INCH
-   return setImageFromFS_13inch(fileName, doRefresh);
-#else
-   return setImageFromFS_7inch(fileName);
-#endif
 }
 
 void displayWipe(bool quick) {
@@ -813,52 +771,5 @@ void displaySetQuickRefresh(bool enable, int refreshTime, int wipeTime) {
    }
    if (wipeTime > 0) {
       displaySettings.displayQuickRefreshWipeTime = wipeTime;
-   }
-}
-
-uint16_t getColor(uint8_t color) {
-   switch (color) {
-   case 0:
-#ifdef EPD_TYPE_13INCH
-      return 0x00;
-#else
-      return GxEPD_BLACK;
-#endif
-   case 1:
-#ifdef EPD_TYPE_13INCH
-      return 0x05;
-#else
-      return GxEPD_BLUE;
-#endif
-   case 2:
-#ifdef EPD_TYPE_13INCH
-      return 0x06;
-#else
-      return GxEPD_GREEN;
-#endif
-   case 3:
-#ifdef EPD_TYPE_13INCH
-      return 0x03;
-#else
-      return GxEPD_RED;
-#endif
-   case 5:
-#ifdef EPD_TYPE_13INCH
-      return 0x02;
-#else
-      return GxEPD_YELLOW;
-#endif
-   case 6:
-#ifdef EPD_TYPE_13INCH
-      return 0x01;
-#else
-      return GxEPD_WHITE;
-#endif
-   default:
-#ifdef EPD_TYPE_13INCH
-      return 0x01;
-#else
-      return GxEPD_WHITE;
-#endif
    }
 }
