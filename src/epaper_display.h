@@ -2,8 +2,6 @@
 #include "types.h"
 #include <Arduino.h>
 
-#define COLOR_WHITE GxEPD_WHITE
-#define COLOR_BLACK GxEPD_BLACK
 
 #define BUSY_PIN 18
 #define DC_PIN 19
@@ -48,19 +46,13 @@ using DisplayType = GxEPD2_7C<GxEPD2_730c_GDEP073E01, GxEPD2_730c_GDEP073E01::HE
 
 extern DisplayType display;
 extern U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;
-extern bool epaperIsUpdating;
 
 void setDisplayData(const char *clientId, int vddValue);
 void initEpaperDisplay(SPIClass &spiBus);
-bool isEpaperActive();
-void deinitDisplay();
 void displaySetRotation(int orientation);
-void displaySetQuickRefresh(bool enable, int refreshTime = 0, int wipeTime = 0);
 void displaySetOverlayOption(DisplayInfoKey key, bool value);
 void displaySetErrorBadge(bool enable);
-void displayTypeDetect();
 void displayOverlays(DisplayType &display, DisplayInfo displayData, bool invertColors, bool fullcolor = false);
 int setImageFromFS(String fileName, bool doRefresh = true);
-void displayWipe(bool quick);
-void displaySetText(String info, bool isBlackboard, bool quickRefresh = true);
+void displaySetText(String info, bool isBlackboard);
 bool waitDisplayComplete(bool quick);

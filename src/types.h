@@ -40,18 +40,12 @@ enum DisplayInfoKey
 
 struct WifiSettings
 {
-   String bleSSID;
-   String blePASS;
    String ssid;
    String pss;
-   int wifiQuality;
-   uint8_t wifiRetries;
    bool wifiIsConnected;
    bool wifiOnboardingFailed;
-   bool wifiConfig;
    bool bleInitOk;
    bool isDeployWifi;
-   String clientId;
 };
 
 struct DisplayInfo
@@ -68,23 +62,12 @@ struct DisplaySettings
 {
    uint8_t rotationText;
    uint8_t rotationPicture;
-   bool quickRefresh;
-   bool globalQuickRefreshDisable;
    int displayQuickRefreshTime;
-   int displayQuickRefreshWipeTime;
-   uint16_t colorWhiteFast;
-   uint16_t colorBlackFast;
-   uint8_t colorWipeFast;
-   uint8_t displayType;
 };
 
 struct Settings
 {
    int timeout;
-   String lut;
-   bool clearscreen;
-   bool showBatteryWarning;
-   bool showWifiWarning;
    bool sleepDisabled;
    String downloadUrl;
    String httpAuthUser;
@@ -113,6 +96,5 @@ struct SystemData
    bool usbConnected;
    int deviceOrientation;
    bool displayPowerOn;
-   bool sdIsInit;
    bool sdReady;
 };

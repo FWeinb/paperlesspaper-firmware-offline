@@ -2,14 +2,10 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <cstdint>
-#define DEST_FS_USES_SPIFFS
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
-// #include <SD_MMC.h>
-#include "Adafruit_GFX.h"
-#include "SPIFFS.h"
 #ifdef EPD_TYPE_13INCH
 #include "SdFat.h" // SD NAND only on the 13" board
 #endif
@@ -60,12 +56,10 @@
 #define LED_PIN 14
 #define BAT_VOLT_SENSE_PIN 2
 #define BAT_VOLT_EN_PIN 3
-#define BUTTON_PIN 9
 #define CHG_EN_PIN 22
 #define CHG_STAT_PIN 23
 
 #define MAX_EPD_WIDTH 1600
-#define MAX_EPD_HEIGHT 1200
 
 #ifdef EPD_TYPE_13INCH
 #define EPD_TYPE_IDENTIFIER "epd13-" // Type of device (screen type)
@@ -77,7 +71,7 @@
 
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
 #define SETTINGS_NAMESPACE "settings" // NVS namespace for all persistent settings
-#define SETTINGS_VERSION 1            // NVS schema version (key "cfgVer"), independent of SOFTWARE_VERSION; bump + add a migration step when the layout changes
+#define SETTINGS_VERSION 2            // NVS schema version (key "cfgVer"), independent of SOFTWARE_VERSION; bump + add a migration step when the layout changes
 #define BLE_BUFFER_SIZE 19200
 
 #define DEFAULT_SLEEP 3600 // Default time how long to sleep after update
@@ -121,21 +115,14 @@
 WifiSettings wifiSettings = {
     .ssid = "",
     .pss = "",
-    .wifiQuality = 0,
-    .wifiRetries = 0,
     .wifiIsConnected = false,
     .wifiOnboardingFailed = false,
     .bleInitOk = false,
     .isDeployWifi = false,
-    .clientId = "",
 };
 
 Settings settings = {
     .timeout = DEFAULT_SLEEP,
-    .lut = "default",
-    .clearscreen = false,
-    .showBatteryWarning = true,
-    .showWifiWarning = true,
     .sleepDisabled = false,
     .downloadUrl = "",
     .httpAuthUser = "",
@@ -165,10 +152,7 @@ SystemData systemData = {
     .sdReady = false,
 };
 
-esp_sleep_wakeup_cause_t wakeup_reason;
-
 KXTJ3 myIMU(ACC_ADDR); // Address can be 0x0E or 0x0F
-WiFiClientSecure net = WiFiClientSecure();
 Preferences preferences;
 Preferences settingsStore; // opened once in setup(), stays open until deep sleep
 Ticker tickerFailsave;
@@ -176,7 +160,6 @@ Ticker perdiodicLed;
 Ticker perdiodicLedOff;
 Ticker periodicAccCheck;
 Ticker tickerStatupCounter;
-Ticker onceDisplay;
 SerialFlashFile saveFile;
 SerialFlashFile rawOutFile;
 SerialFlashFile jpgInFile;
@@ -252,7 +235,7 @@ uint32_t bleWrittenCrc = 0; // CRC32 of all data the worker wrote (worker task);
 volatile uint16_t bleUploadConnHandle = 0xFFFF; // connection that started the current upload (BLE_HS_CONN_HANDLE_NONE)
 
 void ledBlink(int timeout, bool on, int dimValue = 100);
-void debugFS(void);
+void logHeap(void);
 bool BleInit(String deviceId, bool enable);
 int storeSleepTimeMem(int updateTime = 0);
 int clampSleepTimeout(int seconds);
@@ -262,7 +245,6 @@ bool accIntSet(int sensity);
 void checkOrientationInBackground(bool isRunning = true);
 bool applyPendingOrientation();
 bool chargeMode(bool enable);
-bool usbInit();
 bool usbCheckConnect();
 int calculateSleepDuration(int defaultTimeout, bool forceReset, bool getDataOnly = false);
 bool resetAll(bool resetWifi);
@@ -1212,6 +1194,11 @@ void runMigrations() {
       case 0:
          // v0 -> v1: introduces the cfgVer key itself, no data changes
          break;
+      case 1:
+         // v1 -> v2: battWarn / wifiWarn were never used
+         settingsStore.remove("battWarn");
+         settingsStore.remove("wifiWarn");
+         break;
       }
       ver++;
       settingsStore.putInt("cfgVer", ver);
@@ -1219,8 +1206,6 @@ void runMigrations() {
 }
 
 void saveSettings() {
-   settingsStore.putBool("battWarn", settings.showBatteryWarning);
-   settingsStore.putBool("wifiWarn", settings.showWifiWarning);
    settingsStore.putBool("sleepDisabled", settings.sleepDisabled);
    settingsStore.putInt("imageMode", settings.imageMode);
    settingsStore.putString("downloadUrl", settings.downloadUrl);
@@ -1241,8 +1226,6 @@ void restoreSettings() {
    wifiSettings.ssid = settingsStore.getString("ssid", "");
    wifiSettings.pss = settingsStore.getString("pss", "");
    settings.timeout = storeSleepTimeMem(0);
-   settings.showBatteryWarning = settingsStore.getBool("battWarn", true);
-   settings.showWifiWarning = settingsStore.getBool("wifiWarn", true);
    settings.sleepDisabled = settingsStore.getBool("sleepDisabled", false);
    settings.imageMode = settingsStore.getInt("imageMode", 1);
    settings.downloadUrl = stripUrlFragment(settingsStore.getString("downloadUrl", ""));
@@ -1258,10 +1241,9 @@ void restoreSettings() {
    settings.autoRotation = settingsStore.getBool("autoRotation", true);
    settings.telemetry = settingsStore.getBool("telemetry", true);
    Serial.println("[MEM] Settings restored");
-   DEBUG_LOG("[MEM] Settings - BatteryWarning: %d WifiWarning: %d SleepDisabled: %d ImageMode: %d MotionWakeup: %d ChargerMode: %d\n", settings.showBatteryWarning, settings.showWifiWarning, settings.sleepDisabled, settings.imageMode, settings.motionWakeup, settings.chargerMode);
+   DEBUG_LOG("[MEM] Settings - SleepDisabled: %d ImageMode: %d MotionWakeup: %d ChargerMode: %d\n", settings.sleepDisabled, settings.imageMode, settings.motionWakeup, settings.chargerMode);
 }
 
-// loadImageFromWeb removed from here since it's defined later
 
 class ServerCallbacks : public NimBLEServerCallbacks
 {
@@ -2032,45 +2014,6 @@ void initFlashFiles() {
 }
 
 // https://github.com/zenmanenergy/ESP8266-Arduino-Examples/blob/master/helloWorld_urlencoded/urlencode.ino
-unsigned char h2int(char c) {
-   if (c >= '0' && c <= '9') {
-      return ((unsigned char)c - '0');
-   }
-   if (c >= 'a' && c <= 'f') {
-      return ((unsigned char)c - 'a' + 10);
-   }
-   if (c >= 'A' && c <= 'F') {
-      return ((unsigned char)c - 'A' + 10);
-   }
-   return (0);
-}
-
-String urldecode(String str) {
-   String encodedString = "";
-   char c;
-   char code0;
-   char code1;
-   for (int i = 0; i < str.length(); i++) {
-      c = str.charAt(i);
-      if (c == '+') {
-         encodedString += ' ';
-      }
-      else if (c == '%') {
-         i++;
-         code0 = str.charAt(i);
-         i++;
-         code1 = str.charAt(i);
-         c = (h2int(code0) << 4) | h2int(code1);
-         encodedString += c;
-      }
-      else {
-         encodedString += c;
-      }
-      yield();
-   }
-   return encodedString;
-}
-
 // Seconds per retry step; build with -DDL_RETRY_UNIT=2 for a quick test (10 s, 30 s, 60 s)
 #ifndef DL_RETRY_UNIT
 #define DL_RETRY_UNIT 60
@@ -2108,37 +2051,11 @@ int storeSleepTimeMem(int updateTime) {
    return returnSleepTime;
 }
 
-void debugFS() {
-   DEBUG_LOG("[MAIN] SPIFFS usage %d/%d heap free: %d/%d\n", SPIFFS.usedBytes(), SPIFFS.totalBytes(), ESP.getFreeHeap(), ESP.getHeapSize());
+void logHeap() {
+   DEBUG_LOG("[MAIN] heap free: %d/%d\n", ESP.getFreeHeap(), ESP.getHeapSize());
 }
 
 #ifdef EPD_TYPE_13INCH
-void sdTest() {
-   // Test read/write
-   FsFile testFile;
-   if (testFile.open("test.txt", O_WRONLY | O_CREAT | O_TRUNC)) {
-      Serial.println("Writing to test.txt...");
-      testFile.println("Hello SD Card! This is a test of the SdFat library.");
-      testFile.close();
-      Serial.println("Write complete.");
-
-      if (testFile.open("test.txt", O_RDONLY)) {
-         Serial.println("Reading from test.txt:");
-         while (testFile.available()) {
-            Serial.write(testFile.read());
-         }
-         testFile.close();
-         Serial.println("\nRead complete.");
-      }
-      else {
-         Serial.println("Failed to open test.txt for reading.");
-      }
-   }
-   else {
-      Serial.println("Failed to create test.txt.");
-   }
-}
-
 bool sdInit() {
    if (systemData.sdReady) {
       DEBUG_LOG("[SD] skip, init is done...\n");
@@ -2213,10 +2130,9 @@ int loadImageFromWeb(String url, String fileName) {
    url = appendTelemetryParams(url);
    Serial.print("[DL] Download Image file: ");
    Serial.println(url);
-   // int setImage = 0; // Trigger refresh
    int downloadOk = DL_ERR_NETWORK;
    for (int i = 0; i <= 5; i++) {
-      debugFS();
+      logHeap();
       downloadOk = downloadAndSaveFile(fileName.c_str(), url);
       bool retry = (downloadOk == DL_ERR_NETWORK || downloadOk == DL_ERR_STREAM || downloadOk == DL_ERR_SERVER || downloadOk == DL_ERR_SIZE);
       if (!retry)
@@ -2277,7 +2193,6 @@ void gotToDeepSleep(int wakeuptimeout, bool motionWake) {
    display.hibernate();
    powerSupplyDisplay(false);
    delay(5);
-   // digitalWrite(RST_PIN, 0);
    Serial.flush();
    delay(10);
    if (!settings.sleepDisabled)
@@ -2404,23 +2319,6 @@ wakeup_reason_t getWakeupReason() {
    }
    Serial.printf("[WAKE] Got Button System Reset or Others\n");
    return wakeup_reason_t::SYSTEM_RESET;
-}
-
-bool usbInit() {
-   Wire.beginTransmission(USBC_ADDR);
-   Wire.write(0x01);
-   Wire.endTransmission(true); // end write operation, as we just wanted to select the starting register
-
-   Wire.requestFrom(USBC_ADDR, 1); // request 6 bytes from peripheral device #8
-   char c = Wire.read();           // receive a byte as character
-   if (c == 0b00010000) {
-      Serial.println("[USB] init OK");
-      return true;
-   }
-   else {
-      Serial.println("[USB] init FAIL");
-      return false;
-   }
 }
 
 bool usbCheckConnect() {
@@ -2623,7 +2521,6 @@ bool resetAll(bool resetWifi) {
    if (resetWifi) {
       wifiSettings.ssid = "";
       wifiSettings.pss = "";
-      wifiSettings.wifiRetries = 0;
       settingsStoreClear();
    }
    saveSettings();
@@ -2655,51 +2552,6 @@ void startupCounter(int reset) {
    if (reset == 0)
       tickerStatupCounter.once_ms(3000, startupCounter, 1);
    return;
-}
-
-// inputs: nopicture,turnon,updatepicture,wifiactivate,deviceactivate
-void updateDisplayAsyncFunction(int functionNumber) {
-   epaperIsUpdating = true;
-   if (functionNumber == 1) {
-      powerSupplyDisplay(true);
-      displaySetText("Connect via Bluetooth", false, true);
-   }
-   if (functionNumber == 2) {
-   }
-   if (functionNumber == 3) {
-   }
-   if (functionNumber == 4) {
-   }
-   if (functionNumber == 5) {
-   }
-
-   epaperIsUpdating = false;
-   return;
-}
-
-bool updateDisplayAsync(String functionName) {
-   int functionNumber = 0;
-   if (functionName == "connect_bt") {
-      functionNumber = 1;
-   }
-   if (functionName == "") {
-      functionNumber = 2;
-   }
-   if (functionName == "") {
-      functionNumber = 3;
-   }
-   if (functionName == "") {
-      functionNumber = 4;
-   }
-   if (functionName == "") {
-      functionNumber = 5;
-   }
-
-   if (epaperIsUpdating || functionNumber < 1) {
-      return false;
-   }
-   onceDisplay.once_ms(100, updateDisplayAsyncFunction, functionNumber);
-   return true;
 }
 
 void runSetupMode() {
@@ -2891,8 +2743,6 @@ void initFirstBoot(void) {
       Serial.println("[MEM] First boot detected, applying default settings.");
       settingsStoreClear();
       settings.timeout = 3600;
-      settings.showBatteryWarning = true;
-      settings.showWifiWarning = true;
       settings.sleepDisabled = false;
       settings.imageMode = 1;
       settings.motionWakeup = false;
@@ -3038,7 +2888,6 @@ void setup() {
    }
 
    settingsStoreInit();
-   // pinMode(DISP_POWER, INPUT); // USB TEST PINS TODO: only paper 7
    pinMode(INT_PIN, INPUT);
    pinMode(BUSY_PIN, INPUT);
    pinMode(RST_PIN, OUTPUT);
@@ -3064,16 +2913,12 @@ void setup() {
    restoreSettings();
    displaySetOverlayOption(DEVICE_INFO_STRING, true);
    displaySetRotation(0);
-   // myEsp32FOTA removed
    char firmwareVersion[] = SOFTWARE_VERSION;
 
    ledBlink(500, true);
 
    Serial.printf("[MAIN] INIT Device V: %s\n", firmwareVersion);
    DEBUG_LOG("[MAIN] Current counter value: %u VDD: %d\n", StartCounter, systemData.vddValue);
-   if (!SPIFFS.begin(true)) {
-      Serial.println("[MEM] SPIFFS initialisation failed!");
-   }
    if (StartCounter >= 2) {
       settings.forceDownload = true;
       settings.skipSetupMode = true;
@@ -3095,15 +2940,10 @@ void setup() {
    // TODO: maybe do a function to generally check updated mem values
    float temperature = temperatureRead();
    DEBUG_LOG("[MAIN] Temp Main: %.2f °C\n", temperature);
-   if (temperature < 21.0) {
-      Serial.printf("[MAIN] Low Temp detected: %.2f °C - disable quick refresh\n", temperature);
-      displaySetQuickRefresh(false);
-   }
 
    if (buttonWake && !settings.skipSetupMode) {
       tickerFailsave.detach();
       BleInit(CLIENT_ID, true);
-      // updateDisplayAsync("connect_bt");
       runSetupMode();
 
       Serial.println("[MAIN] Setup Mode Completed or Timeout");
@@ -3122,10 +2962,6 @@ void setup() {
    storeSleepTimeMem(settings.timeout);
 
    systemData.sleepPrediction = calculateSleepDuration(settings.timeout, systemData.newSleepTimeSet, false);
-
-   if (SPIFFS.usedBytes() > 10000) {
-      Serial.println("[MEM] SPIFFS seems to full ...");
-   }
 
    delay(10);
 }
@@ -3241,7 +3077,7 @@ void loop() {
          setSuccess = -1;
       }
 
-      debugFS();
+      logHeap();
       Serial.println("[MAIN] End of Update");
       if (settings.imageMode == 0) {
          gotToDeepSleep(0, false);

@@ -17,24 +17,13 @@ DisplayInfo displayInfos = {
 DisplaySettings displaySettings = {
     .rotationText = 3,
     .rotationPicture = 2,
-    .quickRefresh = true,
-    .globalQuickRefreshDisable = false,
 #ifdef EPD_TYPE_13INCH
     .displayQuickRefreshTime = 2500,
-    .displayQuickRefreshWipeTime = 2000,
-    .colorWhiteFast = GxEPD_BLACK,
-    .colorBlackFast = GxEPD_BLUE,
-    .colorWipeFast = 1, // blue
 #else
     .displayQuickRefreshTime = 960,
-    .displayQuickRefreshWipeTime = 960,
-    .colorWhiteFast = GxEPD_WHITE_I,
-    .colorBlackFast = GxEPD_BLACK_I,
-    .colorWipeFast = 1, // blue
 #endif
 };
 
-bool epaperIsUpdating = false;
 static bool displayIsInit = false;
 static SPIClass *epd_spi_bus = nullptr;
 static char epd_client_id[20] = {0};
@@ -70,84 +59,7 @@ void initEpaperDisplay(SPIClass &spiBus) {
    digitalWrite(CS_EPD_PIN, HIGH);
    display.epd2.selectSPI(spiBus, SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
    u8g2_for_adafruit_gfx.begin(display);
-   displayTypeDetect();
    displayIsInit = true;
-}
-
-bool isEpaperActive() {
-   return epaperIsUpdating;
-}
-
-void deinitDisplay() {
-   pinMode(RST_PIN, OUTPUT);
-   digitalWrite(RST_PIN, 1);
-   delay(50); // needs a little longer
-   digitalWrite(RST_PIN, 0);
-   delay(20);
-   displayIsInit = false;
-   display.hibernate();
-   pinMode(RST_PIN, INPUT);
-   pinMode(CS_EPD_PIN, INPUT);
-   pinMode(EPD_CS_S, INPUT);
-   pinMode(DC_PIN, INPUT);
-}
-
-void displayTypeDetect() {
-   uint8_t reg9A[2] = {0};
-   uint8_t patternDKE1[2] = {0x36, 0x42};
-   uint8_t patternDKE2[2] = {0x36, 0x36};
-   uint8_t patternOKRA1[2] = {0x31, 0xC2};
-   uint8_t patternOKRA2[2] = {0x33, 0x00}; // Das zweite Byte wird bei OKRA 2 manchmal nicht gesendet, wir prüfen primär das erste
-
-   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-   display.init(115200);
-
-   epd_spi_bus->endTransaction();
-
-   // Register 0x9A auslesen
-   epd_spi_bus->beginTransaction(SPISettings(DISPLAY_SPI_SPEED, MSBFIRST, SPI_MODE0));
-   digitalWrite(DC_PIN, LOW);
-   digitalWrite(CS_EPD_PIN, LOW);
-   epd_spi_bus->transfer(0x9A);
-   digitalWrite(DC_PIN, HIGH);
-
-   for (int i = 0; i < 2; i++) {
-      reg9A[i] = epd_spi_bus->transfer(0x00);
-   }
-   digitalWrite(CS_EPD_PIN, HIGH);
-   epd_spi_bus->endTransaction();
-
-#ifdef USE_QUICK_REFRESH
-
-   // Pattern Matching
-   if (memcmp(reg9A, patternDKE1, 2) == 0 || memcmp(reg9A, patternDKE2, 2) == 0) {
-      Serial.println("[EPD] Match Found: DKE Display");
-      displaySettings.displayQuickRefreshTime = 1500;
-      displaySettings.displayQuickRefreshWipeTime = 500;
-      displaySettings.colorWhiteFast = GxEPD_RED;
-      displaySettings.colorBlackFast = GxEPD_BLUE;
-      displaySettings.colorWipeFast = 1; // 3
-   }
-   else if (memcmp(reg9A, patternOKRA1, 2) == 0 || memcmp(reg9A, patternOKRA2, 2) == 0) {
-      Serial.println("[EPD] Match Found: OKRA Display");
-      displaySettings.displayQuickRefreshTime = 1500; // 1400-1700
-      displaySettings.displayQuickRefreshWipeTime = 4000;
-      displaySettings.colorWhiteFast = GxEPD_YELLOW;
-      displaySettings.colorBlackFast = GxEPD_WHITE;
-      displaySettings.colorWipeFast = 1; // blue
-   }
-   else {
-      Serial.println("[EPD] No matching Type.");
-      Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
-      displaySettings.globalQuickRefreshDisable = true;
-   }
-
-#else
-   Serial.printf("[EPD] Register 0x9A Read (2 bytes): 0x%02X 0x%02X\n", reg9A[0], reg9A[1]);
-   displaySettings.globalQuickRefreshDisable = true;
-   displaySettings.quickRefresh = false;
-
-#endif
 }
 
 // Error badge (red square with "!") drawn into the top right corner of the image by setImageFromFS
@@ -451,11 +363,9 @@ static void endImageWrite() {
 // flip it if needed, draw the error badge, convert to native colors and send it.
 int setImageFromFS(String fileName, bool doRefresh) {
    const unsigned long tStart = millis();
-   epaperIsUpdating = true;
    saveFile = SerialFlash.open(fileName.c_str());
    if (!saveFile) {
       Serial.println("[BMP] File missing");
-      epaperIsUpdating = false;
       return -1;
    }
 
@@ -486,8 +396,7 @@ int setImageFromFS(String fileName, bool doRefresh) {
       if (!chunkBuffer) {
          Serial.println("[BMP] Malloc for chunk buffer failed! Aborting.");
          saveFile.close();
-         epaperIsUpdating = false;
-         return -1;
+            return -1;
       }
    }
 
@@ -550,46 +459,22 @@ int setImageFromFS(String fileName, bool doRefresh) {
       Serial.printf("[EPD] Refresh %lu ms, total %lu ms\n", tEnd - tData, tEnd - tStart);
    }
 
-   epaperIsUpdating = false;
    return 0;
 }
 
-void displayWipe(bool quick) {
-   if (quick) {
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-      display.init(115200);
-   }
-   else {
-      display.init(115200);
-   }
-
-   display.clearScreen(0x01);
-   display.refresh();
-}
-
-void displaySetText(String info, bool isBlackboard, bool quickRefresh) {
+// Text screens always use the quick refresh (stopped after displayQuickRefreshTime) with the _I colors
+void displaySetText(String info, bool isBlackboard) {
    int foreGround = GxEPD_BLACK_I;
    int backGround = GxEPD_WHITE_I;
    bool invert = false;
 
-   if (!displaySettings.quickRefresh) {
-      if (isBlackboard) {
-         invert = true;
-         foreGround = GxEPD_WHITE;
-         backGround = GxEPD_BLACK;
-      }
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-      display.init(115200);
+   if (isBlackboard) {
+      invert = true;
+      foreGround = GxEPD_WHITE;
+      backGround = GxEPD_BLACK;
    }
-   else {
-      if (isBlackboard) {
-         invert = true;
-         foreGround = GxEPD_WHITE_I;
-         backGround = GxEPD_BLACK_I;
-      }
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, false);
-      display.init(115200);
-   }
+   display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
+   display.init(115200);
 
    display.setRotation(displaySettings.rotationText);
    display.firstPage();
@@ -663,24 +548,5 @@ void displaySetRotation(int orientation) {
       displaySettings.rotationText = 3;
       displaySettings.rotationPicture = 2;
 #endif
-   }
-}
-
-void displaySetQuickRefresh(bool enable, int refreshTime, int wipeTime) {
-   if (displaySettings.globalQuickRefreshDisable) {
-      displaySettings.quickRefresh = false;
-      return;
-   }
-   if (enable) {
-      displaySettings.quickRefresh = true;
-   }
-   else {
-      displaySettings.quickRefresh = false;
-   }
-   if (refreshTime > 0) {
-      displaySettings.displayQuickRefreshTime = refreshTime;
-   }
-   if (wipeTime > 0) {
-      displaySettings.displayQuickRefreshWipeTime = wipeTime;
    }
 }
