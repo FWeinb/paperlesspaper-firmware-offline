@@ -2,7 +2,6 @@
 #include <Arduino.h>
 #include <SerialFlash.h>
 #include <WiFi.h>
-#include <qrcode.h>
 
 // Externs from main.cpp
 extern SerialFlashFile saveFile;
@@ -34,8 +33,6 @@ DisplaySettings displaySettings = {
     .colorWipeFast = 1, // blue
 #endif
 };
-
-QRCode QR;
 
 bool epaperIsUpdating = false;
 static bool displayIsInit = false;
@@ -636,92 +633,6 @@ bool waitDisplayComplete(bool quick) {
       delay(500);
    }
    return false;
-}
-
-void displayTurnOn() {
-   String info = "Ich schlafe ...";
-   String info2 = "Drücke die Taste auf der Rückseite";
-   String info3 = "um mich zu wecken.";
-
-   char msg[128];
-   sprintf(msg, "%s%s%s", "https://paperlesspaper.de/b?d=", epd_client_id, "&w=99");
-
-   uint8_t QRData[qrcode_getBufferSize(QR_VERSION)];
-   uint8_t blockSize;
-   uint8_t page = 0;
-   qrcode_initText(&QR, QRData, QR_VERSION, ECC_LOW, msg);
-   blockSize = 2;
-   uint16_t x0 = (EPD_HEIGHT - 30 * blockSize) / 2;
-   uint16_t y0 = 680;
-
-   int foreGround = GxEPD_WHITE_I;
-   int backGround = GxEPD_BLACK_I;
-   bool fullColor = false;
-
-   Serial.print(F("\n[EPD] Press to turn on Screen Loading - "));
-   if (displaySettings.quickRefresh) {
-      display.init(115200);
-      display.enableQuickRefresh(displaySettings.displayQuickRefreshTime, true);
-   }
-   else {
-      display.enableQuickRefresh(0, false);
-      display.init(115200);
-      foreGround = GxEPD_WHITE;
-      backGround = GxEPD_BLACK;
-      fullColor = true;
-   }
-   display.setRotation(displaySettings.rotationText);
-   display.firstPage();
-   // Display 600*448
-   do {
-      int16_t tw = 0;
-      display.fillScreen(backGround);
-      u8g2_for_adafruit_gfx.setForegroundColor(foreGround); // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setBackgroundColor(backGround); // apply Adafruit GFX color
-      u8g2_for_adafruit_gfx.setFontDirection(0);            // left to right (this is default)
-      u8g2_for_adafruit_gfx.setFontMode(1);                 // use u8g2 transparent mode (this is default)
-
-      display.fillRect(x0 + 2, y0 + 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, QR.size * blockSize + QR_QUIET_ZONE + blockSize - 2, foreGround);
-
-      // For each vertical module
-      for (uint8_t y = 0; y < QR.size; y++) {
-         // For each horizontal module
-         for (uint8_t x = 0; x < QR.size; x++) {
-            if (qrcode_getModule(&QR, x, y))
-               display.fillRect(x0 + (x * blockSize) + QR_QUIET_ZONE,
-                                y0 + (y * blockSize) + QR_QUIET_ZONE,
-                                blockSize, blockSize,
-                                (qrcode_getModule(&QR, x, y)) ? backGround : foreGround);
-         }
-      }
-
-      u8g2_for_adafruit_gfx.setFont(FONT_MAIN); // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info.c_str());
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 300); // start writing at this position
-      u8g2_for_adafruit_gfx.print(info);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_BIG);                     // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info2.c_str());      // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 370); // start writing at this position
-      u8g2_for_adafruit_gfx.print(info2);                          // UTF-8 string: "<" 550 448 664 ">"
-
-      tw = u8g2_for_adafruit_gfx.getUTF8Width(info3.c_str());      // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 395); // start writing at this position
-      u8g2_for_adafruit_gfx.print(info3);
-
-      u8g2_for_adafruit_gfx.setFont(FONT_NORMAL);                  // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("I am sleeping..."); // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 560); // start writing at this position
-      u8g2_for_adafruit_gfx.print("I am sleeping...");
-
-      u8g2_for_adafruit_gfx.setFont(FONT_SMALL);                                              // extended font
-      tw = u8g2_for_adafruit_gfx.getUTF8Width("Press the button on the back to wake me up."); // text box width
-      u8g2_for_adafruit_gfx.setCursor((EPD_HEIGHT - tw) / 2, 590);                            // start writing at this position
-      u8g2_for_adafruit_gfx.print("Press the button on the back to wake me up.");
-
-      displayOverlays(display, displayInfos, true, fullColor);
-   }
-   while (display.nextPage());
 }
 
 void displaySetRotation(int orientation) {

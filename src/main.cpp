@@ -256,7 +256,7 @@ void debugFS(void);
 bool BleInit(String deviceId, bool enable);
 int storeSleepTimeMem(int updateTime = 0);
 int clampSleepTimeout(int seconds);
-void gotToDeepSleep(int seconds, bool showScreen = true, bool motionWake = true);
+void gotToDeepSleep(int seconds, bool motionWake = true);
 int accInit(bool skipInit = false);
 bool accIntSet(int sensity);
 void checkOrientationInBackground(bool isRunning = true);
@@ -1107,7 +1107,7 @@ void WiFiEvent(WiFiEvent_t event) {
 void timeoutFailsafe(int time) {
    Serial.println("[MAIN] Timeout Failsafe");
 
-   gotToDeepSleep(DEFAULT_SLEEP, true, false);
+   gotToDeepSleep(DEFAULT_SLEEP, false);
 }
 
 void ledBlinkFunctionOff() {
@@ -2260,7 +2260,7 @@ void setDeviceUid() {
 }
 
 // sleep x seconds
-void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
+void gotToDeepSleep(int wakeuptimeout, bool motionWake) {
    Serial.printf("[MAIN] Going to Sleep for %d seconds (MotionWake: %d)\n", wakeuptimeout, motionWake);
    checkOrientationInBackground(false);
    if (!settings.sleepDisabled)
@@ -2272,10 +2272,6 @@ void gotToDeepSleep(int wakeuptimeout, bool showScreen, bool motionWake) {
       accIntSet(0);
    }
    waitDisplayComplete(false);
-   if (wakeuptimeout <= 0 && showScreen) {
-      displayTurnOn();
-      waitDisplayComplete(true);
-   }
    ledBlink(0, false);
    delay(5);
    display.hibernate();
@@ -3010,42 +3006,6 @@ void accUpdateOrient() {
    return;
 }
 
-void test() {
-   // adcAttachPin(14);  // Any pin that is ADC capable
-   ledBlink(0, false);
-   char charBuffer[128];
-   pinMode(INT_PIN, OUTPUT);
-   digitalWrite(INT_PIN, LOW);
-   Serial.println("[DEBUG] Test Function");
-   ledBlink(200, false);
-
-   powerSupplyDisplay(true);
-   setImageFromFS(IMAGE_FILE);
-   while (true) {
-   }
-   // displayWipe(false);
-
-   // displaySetText("Connect via Bluetooth", false, true);
-   delay(5000);
-   gotToDeepSleep(0, true, false);
-
-   int timeout;
-   timeout = calculateSleepDuration(DEFAULT_SLEEP, false, false);
-   Serial.printf("time to next update: %d\n", timeout);
-   while (true) {
-      float temperature = temperatureRead();
-      Serial.printf("Temp onBoard = %.2f °C\n", temperature);
-      // bool testCharge = chargeMode(false);
-      systemData.vddValue = readVDD(false);
-      Serial.printf("VDD: %d mV\n", systemData.vddValue);
-      delay(5000);
-   };
-   gotToDeepSleep(60, false, true);
-
-   // display.powerOff();
-   //  BleInit(CLIENT_ID, true);
-}
-
 void setup() {
    chargeMode(false); // enable charge mode
    powerSupplyDisplay(false);
@@ -3067,7 +3027,7 @@ void setup() {
    if (!systemData.usbConnected && systemData.vddValue < 4000) {
       DEBUG_LOG("[MAIN] Bat low protection: %dmV\n", systemData.vddValue);
       analogWrite(LED_PIN, LED_DIM_VALUE);
-      gotToDeepSleep(86000, false, false);
+      gotToDeepSleep(86000, false);
    }
    systemData.wakeupCause = getWakeupReason();
    tickerFailsave.once_ms(FAILSAVE_TIMER * 1000, timeoutFailsafe, 0);
@@ -3139,10 +3099,6 @@ void setup() {
       Serial.printf("[MAIN] Low Temp detected: %.2f °C - disable quick refresh\n", temperature);
       displaySetQuickRefresh(false);
    }
-
-#if DEBUG
-   // test(); //-----------------test---------please remove
-#endif
 
    if (buttonWake && !settings.skipSetupMode) {
       tickerFailsave.detach();
@@ -3288,7 +3244,7 @@ void loop() {
       debugFS();
       Serial.println("[MAIN] End of Update");
       if (settings.imageMode == 0) {
-         gotToDeepSleep(0, false, false);
+         gotToDeepSleep(0, false);
       }
       bool doMotionWake = (settings.imageMode == 1) ? settings.motionWakeup : false;
       int sleepSeconds = (settings.timeout > 0) ? systemData.sleepPrediction : DEFAULT_SLEEP;
@@ -3296,7 +3252,7 @@ void loop() {
          sleepSeconds = downloadRetryDelay(dlFailCount);
          Serial.printf("[DL] Retrying in %d s\n", sleepSeconds);
       }
-      gotToDeepSleep(sleepSeconds, false, doMotionWake);
+      gotToDeepSleep(sleepSeconds, doMotionWake);
    }
 
    // Keep alive for setup mode / BLE configs

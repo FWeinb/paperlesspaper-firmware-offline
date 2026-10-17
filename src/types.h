@@ -19,8 +19,6 @@
 #endif
 
 #define DISPLAY_SPI_SPEED 20000000
-#define QR_VERSION 3
-#define QR_QUIET_ZONE 4
 
 typedef enum
 {
